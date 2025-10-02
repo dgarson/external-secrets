@@ -358,29 +358,29 @@ func init() {
 
 	// Legacy cache flags (deprecated - will be removed in a future release)
 	fs.BoolVar(&legacyEnableCache, "experimental-enable-vault-token-cache", false,
-		"DEPRECATED: This flag is deprecated and will be removed in a future release. Use --vault-client-pool instead.")
+		"DEPRECATED: This flag is deprecated and will be removed in a future release. Use --enable-vault-client-pooling instead.")
 	fs.IntVar(&legacyVaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize,
-		"DEPRECATED: This flag is deprecated and will be removed in a future release. Use --vault-client-pool instead.")
+		"DEPRECATED: This flag is deprecated and will be removed in a future release. Use --enable-vault-client-pooling instead.")
 
 	// New client pool flags
-	fs.BoolVar(&enableClientPool, "vault-client-pool", false,
+	fs.BoolVar(&enableClientPool, "enable-vault-client-pooling", false,
 		"Enable Vault client pooling with identity-based caching and optional token renewal.")
-	fs.BoolVar(&enableTokenRenewal, "vault-token-renewal", false,
-		"Enable automatic Vault token renewal for pooled clients. Only used if --vault-client-pool is set.")
+	fs.BoolVar(&enableTokenRenewal, "enable-vault-token-renewal", false,
+		"Enable automatic Vault token renewal for pooled clients. Only used if --enable-vault-client-pooling is set.")
 	fs.IntVar(&tokenRenewalThresholdPercent, "vault-token-renewal-threshold-percent", 50,
-		"Percentage of token TTL remaining before renewal (1-100). When set, overrides --vault-token-renewal-check-interval with a dynamic interval. Only used if --vault-token-renewal is set.")
+		"Percentage of token TTL remaining before renewal (1-100). When set, overrides --vault-token-renewal-check-interval with a dynamic interval. Only used if --enable-vault-token-renewal is set.")
 	fs.StringVar(&tokenRenewalCheckIntervalStr, "vault-token-renewal-check-interval", "30m",
-		"How often to check if tokens need renewal (e.g., '30m', '1h'). Ignored if --vault-token-renewal-threshold-percent is set. Only used if --vault-token-renewal is set.")
+		"How often to check if tokens need renewal (e.g., '30m', '1h'). Ignored if --vault-token-renewal-threshold-percent is set. Only used if --enable-vault-token-renewal is set.")
 
 	feature.Register(feature.Feature{
 		Flags: fs,
 		Initialize: func() {
 			// Warn about deprecated flags
 			if legacyEnableCache {
-				logger.Error(nil, "DEPRECATED: --experimental-enable-vault-token-cache is deprecated and will be removed in a future release. Please use --vault-client-pool instead.")
+				logger.Error(nil, "DEPRECATED: --experimental-enable-vault-token-cache is deprecated and will be removed in a future release. Please use --enable-vault-client-pooling instead.")
 			}
 			if legacyVaultTokenCacheSize != defaultCacheSize {
-				logger.Error(nil, "DEPRECATED: --experimental-vault-token-cache-size is deprecated and will be removed in a future release. Please use --vault-client-pool instead.")
+				logger.Error(nil, "DEPRECATED: --experimental-vault-token-cache-size is deprecated and will be removed in a future release. Please use --enable-vault-client-pooling instead.")
 			}
 
 			// Parse renewal check interval

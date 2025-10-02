@@ -495,20 +495,20 @@ spec:
       - name: external-secrets
         image: ghcr.io/external-secrets/external-secrets:latest
         args:
-        - --vault-client-pool                              # Enable client pooling
-        - --vault-token-renewal                            # Enable automatic token renewal
+        - --enable-vault-client-pooling                    # Enable client pooling
+        - --enable-vault-token-renewal                     # Enable automatic token renewal
         - --vault-token-renewal-threshold-percent=50       # Renew at 50% TTL (default)
-        - --vault-token-renewal-check-interval=1m          # Check every minute (default)
+        - --vault-token-renewal-check-interval=30m         # Check every 30 minutes (default)
 ```
 
 #### Configuration Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--vault-client-pool` | `false` | Enable Vault client pooling |
-| `--vault-token-renewal` | `false` | Enable automatic token renewal for pooled clients |
-| `--vault-token-renewal-threshold-percent` | `50` | Percentage of TTL remaining before renewal (1-100) |
-| `--vault-token-renewal-check-interval` | `1m` | How often to check if tokens need renewal |
+| `--enable-vault-client-pooling` | `false` | Enable Vault client pooling |
+| `--enable-vault-token-renewal` | `false` | Enable automatic token renewal for pooled clients |
+| `--vault-token-renewal-threshold-percent` | `50` | Percentage of TTL remaining before renewal (1-100). When set, overrides check interval with dynamic calculation |
+| `--vault-token-renewal-check-interval` | `30m` | How often to check if tokens need renewal. Ignored if threshold percent is set with default interval |
 
 #### How It Works
 
@@ -569,12 +569,12 @@ spec:
         image: ghcr.io/external-secrets/external-secrets:latest
         args:
         # Enable Vault client pooling
-        - --vault-client-pool
+        - --enable-vault-client-pooling
         # Enable automatic token renewal
-        - --vault-token-renewal
+        - --enable-vault-token-renewal
         # Renew tokens when they reach 70% of their TTL
         - --vault-token-renewal-threshold-percent=70
-        # Check for renewal every 30 seconds
+        # Check interval (optional - will use dynamic calculation based on token TTL if using default)
         - --vault-token-renewal-check-interval=30s
 ```
 
@@ -614,7 +614,7 @@ avg_over_time(externalsecret_vault_client_pool_size[5m])
 
 !!! tip "Performance"
     For best performance in high-volume environments:
-    - Enable both `--vault-client-pool` and `--vault-token-renewal`
+    - Enable both `--enable-vault-client-pooling` and `--enable-vault-token-renewal`
     - Set renewal threshold to 50-70% to ensure tokens are renewed well before expiration
     - Monitor cache hit rate metrics to verify pooling is effective
 
