@@ -157,9 +157,9 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 			return pooled.client, nil
 		}
 
-		// Token is invalid, try to re-authenticate
-		logger.V(1).Info("cached vault client token invalid, re-authenticating", "key", keyStr)
-		reauthErr := p.reauthenticate(ctx, pooled)
+		// Token is invalid, try to re-authenticate with fresh credentials from current config
+		logger.V(1).Info("cached vault client token invalid, re-authenticating with fresh credentials", "key", keyStr)
+		reauthErr := p.reauthenticate(ctx, pooled, config)
 		metrics.ObserveVaultClientPoolOperation("client_reauth", pooled.client.GetAddress(), reauthErr)
 		if reauthErr != nil {
 			// Re-authentication failed, remove from cache and create new
@@ -458,17 +458,21 @@ func (p *CachingClientPool) checkAndRenew(pooled *pooledClient) error {
 	return nil
 }
 
-// reauthenticate attempts to re-authenticate an existing client.
-func (p *CachingClientPool) reauthenticate(ctx context.Context, pooled *pooledClient) error {
+// reauthenticate attempts to re-authenticate an existing client using fresh credentials.
+// This uses the current config (from the AcquireClient call) rather than cached config,
+// ensuring that if credentials have been rotated in Kubernetes (e.g., AppRole secret,
+// ServiceAccount token), we use the latest values.
+func (p *CachingClientPool) reauthenticate(ctx context.Context, pooled *pooledClient, currentConfig AcquireClientConfig) error {
 	pooled.mu.Lock()
 	defer pooled.mu.Unlock()
 
+	// Use current config (with fresh credentials from K8s) instead of cached config
 	c := &client{
-		kube:      pooled.config.Kube,
-		corev1:    pooled.config.CoreV1,
-		store:     pooled.config.VaultProvider,
-		namespace: pooled.config.Namespace,
-		storeKind: pooled.config.StoreKind,
+		kube:      currentConfig.Kube,
+		corev1:    currentConfig.CoreV1,
+		store:     currentConfig.VaultProvider,
+		namespace: currentConfig.Namespace,
+		storeKind: currentConfig.StoreKind,
 		client:    pooled.client,
 		auth:      pooled.client.Auth(),
 		logical:   pooled.client.Logical(),
@@ -476,10 +480,12 @@ func (p *CachingClientPool) reauthenticate(ctx context.Context, pooled *pooledCl
 		log:       logger,
 	}
 
-	if err := c.setAuth(ctx, pooled.config.VaultConfig); err != nil {
+	if err := c.setAuth(ctx, currentConfig.VaultConfig); err != nil {
 		return fmt.Errorf("failed to re-authenticate: %w", err)
 	}
 
+	// Update the cached config with fresh credentials for future renewals
+	pooled.config = currentConfig
 	pooled.lastRenewed = time.Now()
 	return nil
 }
