@@ -18,6 +18,7 @@ package fake
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -159,10 +160,12 @@ func (f Logical) WriteWithContext(ctx context.Context, path string, data map[str
 
 type RevokeSelfWithContextFn func(ctx context.Context, token string) error
 type LookupSelfWithContextFn func(ctx context.Context) (*vault.Secret, error)
+type RenewSelfWithContextFn func(ctx context.Context, increment int) (*vault.Secret, error)
 
 type Token struct {
 	RevokeSelfWithContextFn RevokeSelfWithContextFn
 	LookupSelfWithContextFn LookupSelfWithContextFn
+	RenewSelfWithContextFn  RenewSelfWithContextFn
 }
 
 func (f Token) RevokeSelfWithContext(ctx context.Context, token string) error {
@@ -170,6 +173,13 @@ func (f Token) RevokeSelfWithContext(ctx context.Context, token string) error {
 }
 func (f Token) LookupSelfWithContext(ctx context.Context) (*vault.Secret, error) {
 	return f.LookupSelfWithContextFn(ctx)
+}
+func (f Token) RenewSelfWithContext(ctx context.Context, increment int) (*vault.Secret, error) {
+	if f.RenewSelfWithContextFn == nil {
+		// Default implementation for tests that don't specify renewal
+		return &vault.Secret{}, nil
+	}
+	return f.RenewSelfWithContextFn(ctx, increment)
 }
 
 type MockSetTokenFn func(v string)
@@ -190,9 +200,22 @@ type VaultListResponse struct {
 }
 
 func NewAuthTokenFn() Token {
-	return Token{nil, func(ctx context.Context) (*vault.Secret, error) {
-		return &(vault.Secret{}), nil
-	}}
+	return Token{
+		RevokeSelfWithContextFn: nil,
+		LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
+			// Return a valid token response with required fields
+			return &vault.Secret{
+				Data: map[string]interface{}{
+					"type":         "service",
+					"ttl":          json.Number("3600"),
+					"creation_ttl": json.Number("3600"),
+					"renewable":    true,
+					"expire_time":  "2099-01-01T00:00:00Z", // Far future
+				},
+			}, nil
+		},
+		RenewSelfWithContextFn: nil,
+	}
 }
 
 func NewSetTokenFn(ofn ...func(v string)) MockSetTokenFn {
@@ -311,11 +334,15 @@ func ModifiableClientWithLoginMock(opts ...func(cl *VaultClient)) func(config *v
 
 func clientWithLoginMockOptions(_ *vault.Config, opts ...func(cl *VaultClient)) (util.Client, error) {
 	cl := &VaultClient{
-		MockAuthToken: NewAuthTokenFn(),
-		MockSetToken:  NewSetTokenFn(),
-		MockToken:     NewTokenFn(""),
-		MockAuth:      NewVaultAuth(),
-		MockLogical:   NewVaultLogical(),
+		MockAuthToken:    NewAuthTokenFn(),
+		MockSetToken:     NewSetTokenFn(),
+		MockToken:        NewTokenFn(""),
+		MockClearToken:   NewClearTokenFn(),
+		MockAuth:         NewVaultAuth(),
+		MockLogical:      NewVaultLogical(),
+		MockNamespace:    func() string { return "" },
+		MockSetNamespace: func(string) {},
+		MockAddHeader:    NewAddHeaderFn(),
 	}
 
 	for _, opt := range opts {

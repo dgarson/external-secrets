@@ -32,6 +32,7 @@ type Auth interface {
 type Token interface {
 	RevokeSelfWithContext(ctx context.Context, token string) error
 	LookupSelfWithContext(ctx context.Context) (*vault.Secret, error)
+	RenewSelfWithContext(ctx context.Context, increment int) (*vault.Secret, error)
 }
 
 type Logical interface {
@@ -63,6 +64,24 @@ type VaultClient struct {
 	NamespaceFunc    func() string
 	SetNamespaceFunc func(namespace string)
 	AddHeaderFunc    func(key, value string)
+}
+
+type VaultToken struct {
+	RevokeSelfFunc func(ctx context.Context, token string) error
+	LookupSelfFunc func(ctx context.Context) (*vault.Secret, error)
+	RenewSelfFunc  func(ctx context.Context, increment int) (*vault.Secret, error)
+}
+
+func (v *VaultToken) RevokeSelfWithContext(ctx context.Context, token string) error {
+	return v.RevokeSelfFunc(ctx, token)
+}
+
+func (v *VaultToken) LookupSelfWithContext(ctx context.Context) (*vault.Secret, error) {
+	return v.LookupSelfFunc(ctx)
+}
+
+func (v *VaultToken) RenewSelfWithContext(ctx context.Context, increment int) (*vault.Secret, error) {
+	return v.RenewSelfFunc(ctx, increment)
 }
 
 func (v VaultClient) AddHeader(key, value string) {

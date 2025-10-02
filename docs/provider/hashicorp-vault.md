@@ -465,6 +465,159 @@ spec:
     - For existing secrets, it automatically retrieves the current version before updating
     - CAS helps prevent conflicts when multiple External Secrets instances manage the same secrets
 
+### Client Pooling and Token Renewal
+
+The Vault provider supports client pooling and automatic token renewal to improve performance and reduce authentication overhead.
+
+#### Overview
+
+By default, External Secrets Operator creates a new Vault client and authenticates on every secret reconciliation. With client pooling enabled, the operator maintains a pool of authenticated Vault clients that are reused across reconciliations. Clients in the pool are cached based on their connection identity (Vault server, authentication method, namespace, etc.) rather than Kubernetes resource identity.
+
+Benefits:
+- **Reduced authentication overhead**: Clients are authenticated once and reused
+- **Better performance**: Cache hits avoid unnecessary Vault API calls
+- **Automatic token renewal**: Background goroutines renew tokens before expiration
+- **Configurable**: Feature flags allow fine-grained control
+
+#### Enabling Client Pooling
+
+Client pooling is disabled by default. Enable it using command-line flags when deploying the External Secrets Operator:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-secrets
+spec:
+  template:
+    spec:
+      containers:
+      - name: external-secrets
+        image: ghcr.io/external-secrets/external-secrets:latest
+        args:
+        - --vault-client-pool                              # Enable client pooling
+        - --vault-token-renewal                            # Enable automatic token renewal
+        - --vault-token-renewal-threshold-percent=50       # Renew at 50% TTL (default)
+        - --vault-token-renewal-check-interval=1m          # Check every minute (default)
+```
+
+#### Configuration Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--vault-client-pool` | `false` | Enable Vault client pooling |
+| `--vault-token-renewal` | `false` | Enable automatic token renewal for pooled clients |
+| `--vault-token-renewal-threshold-percent` | `50` | Percentage of TTL remaining before renewal (1-100) |
+| `--vault-token-renewal-check-interval` | `1m` | How often to check if tokens need renewal |
+
+#### How It Works
+
+**Cache Key Composition**
+
+Clients are cached based on their connection identity:
+- Vault server URL
+- Authentication method (AppRole, Kubernetes, JWT, etc.)
+- Authentication configuration hash
+- Vault namespace
+- Credential namespace (for ClusterSecretStore with referent specs)
+- TLS configuration hash
+
+This ensures that:
+- Different Vault servers get separate clients
+- Different authentication methods get separate clients
+- Different namespaces get separate clients
+- Same configuration across multiple ExternalSecrets shares a client
+
+**Token Renewal**
+
+When token renewal is enabled:
+1. A background goroutine monitors each pooled client
+2. Tokens are checked at the configured interval
+3. If TTL falls below the threshold percentage, the token is renewed
+4. Static tokens (configured via `tokenSecretRef`) are never renewed
+
+**Re-authentication**
+
+If a cached client's token becomes invalid:
+1. The operator attempts to re-authenticate using the cached credentials
+2. On success, the new token is used
+3. On failure, the client is removed from cache and a new one is created
+
+#### Example Configuration
+
+Full example with all client pooling features enabled:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-secrets
+  namespace: external-secrets-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-secrets
+  template:
+    metadata:
+      labels:
+        app: external-secrets
+    spec:
+      serviceAccountName: external-secrets
+      containers:
+      - name: external-secrets
+        image: ghcr.io/external-secrets/external-secrets:latest
+        args:
+        # Enable Vault client pooling
+        - --vault-client-pool
+        # Enable automatic token renewal
+        - --vault-token-renewal
+        # Renew tokens when they reach 70% of their TTL
+        - --vault-token-renewal-threshold-percent=70
+        # Check for renewal every 30 seconds
+        - --vault-token-renewal-check-interval=30s
+```
+
+#### Metrics
+
+When client pooling is enabled, the following Prometheus metrics are exposed:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `externalsecret_vault_client_pool_operations_total` | Counter | `operation`, `status` | Count of pool operations (cache_hit, cache_miss, client_created, client_reauth, pool_closed) |
+| `externalsecret_vault_client_pool_size` | Gauge | - | Current number of clients in the pool |
+| `externalsecret_vault_client_token_renewals_total` | Counter | `status` | Count of token renewal attempts |
+| `externalsecret_vault_client_token_renewal_duration_seconds` | Histogram | - | Duration of token renewal operations |
+
+Example Prometheus queries:
+
+```promql
+# Cache hit rate
+rate(externalsecret_vault_client_pool_operations_total{operation="cache_hit"}[5m])
+  /
+rate(externalsecret_vault_client_pool_operations_total{operation=~"cache_hit|cache_miss"}[5m])
+
+# Token renewal success rate
+rate(externalsecret_vault_client_pool_operations_total{operation="token_renewal",status="success"}[5m])
+
+# Average pool size
+avg_over_time(externalsecret_vault_client_pool_size[5m])
+```
+
+#### Important Notes
+
+!!! warning "Static Tokens"
+    Tokens configured via `auth.tokenSecretRef` are considered static and will **not** be renewed automatically, even if token renewal is enabled. Only tokens obtained through authentication methods (AppRole, Kubernetes, JWT, etc.) are renewed.
+
+!!! note "Backward Compatibility"
+    Client pooling is disabled by default to ensure backward compatibility. When disabled, the operator behaves exactly as before, creating a new client for each reconciliation.
+
+!!! tip "Performance"
+    For best performance in high-volume environments:
+    - Enable both `--vault-client-pool` and `--vault-token-renewal`
+    - Set renewal threshold to 50-70% to ensure tokens are renewed well before expiration
+    - Monitor cache hit rate metrics to verify pooling is effective
+
 ### Vault Enterprise
 
 #### Eventual Consistency and Performance Standby Nodes

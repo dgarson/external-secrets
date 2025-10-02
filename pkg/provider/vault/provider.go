@@ -42,6 +42,7 @@ var (
 	enableCache bool
 	logger      = ctrl.Log.WithName("provider").WithName("vault")
 	clientCache *cache.Cache[util.Client]
+	clientPool  ClientPool // Global client pool instance
 )
 
 const (
@@ -60,6 +61,9 @@ type Provider struct {
 	// NewVaultClient is a function that returns a new Vault client.
 	// This is used for testing to inject a fake client.
 	NewVaultClient func(config *vault.Config) (util.Client, error)
+
+	// ClientPool manages Vault client instances. If nil, a default pool will be used.
+	ClientPool ClientPool
 }
 
 // NewVaultClient returns a new Vault client.
@@ -68,12 +72,17 @@ func NewVaultClient(config *vault.Config) (util.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	tokenAPI := vaultClient.Auth().Token()
 	return &util.VaultClient{
 		SetTokenFunc:     vaultClient.SetToken,
 		TokenFunc:        vaultClient.Token,
 		ClearTokenFunc:   vaultClient.ClearToken,
 		AuthField:        vaultClient.Auth(),
-		AuthTokenField:   vaultClient.Auth().Token(),
+		AuthTokenField: &util.VaultToken{
+			RevokeSelfFunc: tokenAPI.RevokeSelfWithContext,
+			LookupSelfFunc: tokenAPI.LookupSelfWithContext,
+			RenewSelfFunc:  tokenAPI.RenewSelfWithContext,
+		},
 		LogicalField:     vaultClient.Logical(),
 		NamespaceFunc:    vaultClient.Namespace,
 		SetNamespaceFunc: vaultClient.SetNamespace,
@@ -103,17 +112,28 @@ func (p *Provider) NewClient(ctx context.Context, store esv1.GenericStore, kube 
 }
 
 func (p *Provider) NewGeneratorClient(ctx context.Context, kube kclient.Client, corev1 typedcorev1.CoreV1Interface, vaultSpec *esv1.VaultProvider, namespace string, retrySettings *esv1.SecretStoreRetrySettings) (util.Client, error) {
-	vStore, cfg, err := p.prepareConfig(ctx, kube, corev1, vaultSpec, retrySettings, namespace, resolvers.EmptyStoreKind)
+	_, cfg, err := p.prepareConfig(ctx, kube, corev1, vaultSpec, retrySettings, namespace, resolvers.EmptyStoreKind)
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := p.NewVaultClient(cfg)
-	if err != nil {
-		return nil, err
+	// Get or create client pool
+	pool := p.getClientPool()
+
+	// Build acquire config
+	acquireConfig := AcquireClientConfig{
+		VaultConfig:   cfg,
+		VaultProvider: vaultSpec,
+		Kube:          kube,
+		CoreV1:        corev1,
+		Namespace:     namespace,
+		StoreKind:     resolvers.EmptyStoreKind,
+		StoreName:     "generator",
+		StoreNamespace: namespace,
 	}
 
-	_, err = p.initClient(ctx, vStore, client, cfg, vaultSpec)
+	// Acquire client from pool
+	client, err := pool.AcquireClient(ctx, acquireConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -140,12 +160,28 @@ func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube 
 		return nil, err
 	}
 
-	client, err := getVaultClient(p, store, cfg, namespace)
-	if err != nil {
-		return nil, fmt.Errorf(errVaultClient, err)
+	// Get or create client pool
+	pool := p.getClientPool()
+
+	// Build acquire config
+	acquireConfig := AcquireClientConfig{
+		VaultConfig:    cfg,
+		VaultProvider:  vaultSpec,
+		Kube:           kube,
+		CoreV1:         corev1,
+		Namespace:      namespace,
+		StoreKind:      store.GetObjectKind().GroupVersionKind().Kind,
+		StoreName:      store.GetObjectMeta().Name,
+		StoreNamespace: store.GetObjectMeta().Namespace,
 	}
 
-	return p.initClient(ctx, vStore, client, cfg, vaultSpec)
+	// Acquire client from pool
+	vaultClient, err := pool.AcquireClient(ctx, acquireConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.initClient(ctx, vStore, vaultClient, cfg, vaultSpec)
 }
 
 func (p *Provider) initClient(ctx context.Context, c *client, client util.Client, cfg *vault.Config, vaultSpec *esv1.VaultProvider) (esv1.SecretsClient, error) {
@@ -217,6 +253,26 @@ func (p *Provider) prepareConfig(ctx context.Context, kube kclient.Client, corev
 	return c, cfg, nil
 }
 
+// getClientPool returns the ClientPool to use for this provider.
+// If the provider has a ClientPool set, it uses that. Otherwise, it uses the global clientPool.
+// If neither is set, it creates a default NoOpClientPool.
+func (p *Provider) getClientPool() ClientPool {
+	if p.ClientPool != nil {
+		return p.ClientPool
+	}
+	if clientPool != nil {
+		return clientPool
+	}
+	// Fallback for tests or when feature flags haven't been initialized
+	newClientFunc := p.NewVaultClient
+	if newClientFunc == nil {
+		newClientFunc = NewVaultClient
+	}
+	return NewNoOpClientPool(newClientFunc)
+}
+
+// getVaultClient is a legacy helper for tests. Use getClientPool() instead.
+// DEPRECATED: This function is kept for backward compatibility with existing tests.
 func getVaultClient(p *Provider, store esv1.GenericStore, cfg *vault.Config, namespace string) (util.Client, error) {
 	vaultProvider := store.GetSpec().Provider.Vault
 	auth := vaultProvider.Auth
@@ -306,15 +362,70 @@ func initCache(size int) {
 	})
 }
 
+func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, renewalInterval time.Duration) {
+	if enablePooling {
+		logger.Info("initializing vault client pool with caching",
+			"enableRenewal", enableRenewal,
+			"renewalThreshold", renewalThreshold,
+			"renewalInterval", renewalInterval)
+		clientPool = NewCachingClientPool(CachingClientPoolConfig{
+			NewVaultClient:          NewVaultClient,
+			EnableRenewal:           enableRenewal,
+			RenewalThresholdPercent: renewalThreshold,
+			RenewalCheckInterval:    renewalInterval,
+		})
+	} else {
+		logger.Info("initializing vault client pool without caching (legacy mode)")
+		clientPool = NewNoOpClientPool(NewVaultClient)
+	}
+}
+
 func init() {
-	var vaultTokenCacheSize int
+	var (
+		vaultTokenCacheSize            int
+		enableClientPool               bool
+		enableTokenRenewal             bool
+		tokenRenewalThresholdPercent   int
+		tokenRenewalCheckIntervalStr   string
+	)
+
 	fs := pflag.NewFlagSet("vault", pflag.ExitOnError)
-	fs.BoolVar(&enableCache, "experimental-enable-vault-token-cache", false, "Enable experimental Vault token cache. External secrets will reuse the Vault token without creating a new one on each request.")
-	// max. 265k vault leases with 30bytes each ~= 7MB
-	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize, "Maximum size of Vault token cache. When more tokens than Only used if --experimental-enable-vault-token-cache is set.")
+
+	// Legacy cache flags (deprecated, kept for backward compatibility)
+	fs.BoolVar(&enableCache, "experimental-enable-vault-token-cache", false,
+		"DEPRECATED: Use --vault-client-pool instead. Enable experimental Vault token cache.")
+	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize,
+		"DEPRECATED: Maximum size of Vault token cache. Only used if --experimental-enable-vault-token-cache is set.")
+
+	// New client pool flags
+	fs.BoolVar(&enableClientPool, "vault-client-pool", false,
+		"Enable Vault client pooling with identity-based caching and optional token renewal.")
+	fs.BoolVar(&enableTokenRenewal, "vault-token-renewal", false,
+		"Enable automatic Vault token renewal for pooled clients. Only used if --vault-client-pool is set.")
+	fs.IntVar(&tokenRenewalThresholdPercent, "vault-token-renewal-threshold-percent", 50,
+		"Percentage of token TTL remaining before renewal (1-100). Only used if --vault-token-renewal is set.")
+	fs.StringVar(&tokenRenewalCheckIntervalStr, "vault-token-renewal-check-interval", "1m",
+		"How often to check if tokens need renewal (e.g., '1m', '30s'). Only used if --vault-token-renewal is set.")
+
 	feature.Register(feature.Feature{
-		Flags:      fs,
-		Initialize: func() { initCache(vaultTokenCacheSize) },
+		Flags: fs,
+		Initialize: func() {
+			// Parse renewal check interval
+			renewalInterval, err := time.ParseDuration(tokenRenewalCheckIntervalStr)
+			if err != nil {
+				logger.Error(err, "invalid vault-token-renewal-check-interval, using default 1m")
+				renewalInterval = 1 * time.Minute
+			}
+
+			// Initialize the appropriate client pool
+			usePooling := enableClientPool || enableCache
+			initClientPool(usePooling, enableTokenRenewal, tokenRenewalThresholdPercent, renewalInterval)
+
+			// Initialize legacy cache if old flag is used (for backward compatibility)
+			if enableCache && !enableClientPool {
+				initCache(vaultTokenCacheSize)
+			}
+		},
 	})
 
 	esv1.Register(&Provider{
