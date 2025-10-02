@@ -244,6 +244,8 @@ func NewAddHeaderFn() MockAddHeaderFn {
 	}
 }
 
+type MockGetAddressFn func() string
+
 type VaultClient struct {
 	MockLogical      Logical
 	MockAuth         Auth
@@ -254,6 +256,7 @@ type VaultClient struct {
 	MockNamespace    MockNamespaceFn
 	MockSetNamespace MockSetNamespaceFn
 	MockAddHeader    MockAddHeaderFn
+	MockGetAddress   MockGetAddressFn
 
 	namespace string
 	lock      sync.RWMutex
@@ -322,6 +325,10 @@ func (c *VaultClient) AddHeader(key, value string) {
 	c.MockAddHeader(key, value)
 }
 
+func (c *VaultClient) GetAddress() string {
+	return c.MockGetAddress()
+}
+
 func ClientWithLoginMock(config *vault.Config) (util.Client, error) {
 	return clientWithLoginMockOptions(config)
 }
@@ -343,6 +350,7 @@ func clientWithLoginMockOptions(_ *vault.Config, opts ...func(cl *VaultClient)) 
 		MockNamespace:    func() string { return "" },
 		MockSetNamespace: func(string) {},
 		MockAddHeader:    NewAddHeaderFn(),
+		MockGetAddress:   func() string { return "https://vault.example.com" },
 	}
 
 	for _, opt := range opts {
@@ -359,5 +367,6 @@ func clientWithLoginMockOptions(_ *vault.Config, opts ...func(cl *VaultClient)) 
 		NamespaceFunc:    cl.Namespace,
 		SetNamespaceFunc: cl.SetNamespace,
 		AddHeaderFunc:    cl.AddHeader,
+		GetAddressFunc:   cl.GetAddress,
 	}, nil
 }

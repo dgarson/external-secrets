@@ -243,7 +243,7 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 					return &vault.Secret{
 						Data: map[string]interface{}{
 							"ttl":          json.Number("100"),  // Low TTL to trigger renewal
-							"creation_ttl": json.Number("3600"), // High creation TTL
+							"creation_ttl": json.Number("3600"), // creation_ttl
 							"renewable":    true,
 							"type":         "service",
 						},
@@ -261,7 +261,7 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 			return client, nil
 		},
 		EnableRenewal:           true,
-		RenewalThresholdPercent: 50,
+		RenewalThresholdPercent: 50, // Since we provide explicit RenewalCheckInterval, dynamic calculation is skipped
 		RenewalCheckInterval:    50 * time.Millisecond,
 	})
 	defer pool.Close(context.Background())
@@ -306,8 +306,8 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 	require.NotNil(t, client)
 
 	// Wait for renewal to happen
-	// TTL is 100, threshold is 50%, creation_ttl is 3600
-	// Threshold = 3600/2 = 1800, and 100 < 1800, so renewal should happen
+	// Using static check interval of 50ms since we provided explicit RenewalCheckInterval
+	// TTL is 100, threshold is 50% of creation_ttl (3600) = 1800, and 100 < 1800, so renewal should happen
 	time.Sleep(250 * time.Millisecond)
 
 	count := renewalCallCount.Load()

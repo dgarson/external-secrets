@@ -43,26 +43,26 @@ var (
 		Subsystem: ExternalSecretSubsystem,
 		Name:      vaultClientPoolOperations,
 		Help:      "Number of Vault client pool operations",
-	}, []string{"operation", "status"})
+	}, []string{"operation", "status", "address"})
 
-	vaultClientPoolGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+	vaultClientPoolGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      vaultClientPoolSize,
 		Help:      "Current number of clients in the Vault client pool",
-	})
+	}, []string{"address"})
 
 	vaultTokenRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      vaultClientTokenRenewals,
 		Help:      "Number of Vault token renewal attempts",
-	}, []string{"status"})
+	}, []string{"status", "address"})
 
-	vaultTokenRenewalDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+	vaultTokenRenewalDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      vaultClientTokenRenewalTimer,
 		Help:      "Duration of Vault token renewal operations in seconds",
 		Buckets:   prometheus.DefBuckets,
-	})
+	}, []string{"address"})
 )
 
 func ObserveAPICall(provider, call string, err error) {
@@ -71,23 +71,23 @@ func ObserveAPICall(provider, call string, err error) {
 
 // ObserveVaultClientPoolOperation records a Vault client pool operation.
 // operation can be: "cache_hit", "cache_miss", "client_created", "client_reauth", "pool_closed"
-func ObserveVaultClientPoolOperation(operation string, err error) {
-	vaultClientPoolOps.WithLabelValues(operation, deriveStatus(err)).Inc()
+func ObserveVaultClientPoolOperation(operation, address string, err error) {
+	vaultClientPoolOps.WithLabelValues(operation, deriveStatus(err), address).Inc()
 }
 
 // SetVaultClientPoolSize sets the current size of the Vault client pool.
-func SetVaultClientPoolSize(size int) {
-	vaultClientPoolGauge.Set(float64(size))
+func SetVaultClientPoolSize(address string, size int) {
+	vaultClientPoolGauge.WithLabelValues(address).Set(float64(size))
 }
 
 // ObserveVaultTokenRenewal records a Vault token renewal attempt.
-func ObserveVaultTokenRenewal(err error) {
-	vaultTokenRenewals.WithLabelValues(deriveStatus(err)).Inc()
+func ObserveVaultTokenRenewal(address string, err error) {
+	vaultTokenRenewals.WithLabelValues(deriveStatus(err), address).Inc()
 }
 
 // ObserveVaultTokenRenewalDuration records the duration of a token renewal operation.
-func ObserveVaultTokenRenewalDuration(seconds float64) {
-	vaultTokenRenewalDuration.Observe(seconds)
+func ObserveVaultTokenRenewalDuration(address string, seconds float64) {
+	vaultTokenRenewalDuration.WithLabelValues(address).Observe(seconds)
 }
 
 func deriveStatus(err error) string {

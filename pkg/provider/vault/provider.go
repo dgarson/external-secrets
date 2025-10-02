@@ -31,18 +31,15 @@ import (
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
-	"github.com/external-secrets/external-secrets/pkg/cache"
 	"github.com/external-secrets/external-secrets/pkg/feature"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
 var (
-	_           esv1.Provider = &Provider{}
-	enableCache bool
-	logger      = ctrl.Log.WithName("provider").WithName("vault")
-	clientCache *cache.Cache[util.Client]
-	clientPool  ClientPool // Global client pool instance
+	_          esv1.Provider = &Provider{}
+	logger     = ctrl.Log.WithName("provider").WithName("vault")
+	clientPool ClientPool // Global client pool instance
 )
 
 const (
@@ -87,6 +84,7 @@ func NewVaultClient(config *vault.Config) (util.Client, error) {
 		NamespaceFunc:    vaultClient.Namespace,
 		SetNamespaceFunc: vaultClient.SetNamespace,
 		AddHeaderFunc:    vaultClient.AddHeader,
+		GetAddressFunc:   vaultClient.Address,
 	}, nil
 }
 
@@ -273,37 +271,11 @@ func (p *Provider) getClientPool() ClientPool {
 
 // getVaultClient is a legacy helper for tests. Use getClientPool() instead.
 // DEPRECATED: This function is kept for backward compatibility with existing tests.
+// It simply creates a new Vault client without any caching.
 func getVaultClient(p *Provider, store esv1.GenericStore, cfg *vault.Config, namespace string) (util.Client, error) {
-	vaultProvider := store.GetSpec().Provider.Vault
-	auth := vaultProvider.Auth
-	isStaticToken := auth != nil && auth.TokenSecretRef != nil
-	useCache := enableCache && !isStaticToken
-
-	keyNamespace := store.GetObjectMeta().Namespace
-	// A single ClusterSecretStore may need to spawn separate vault clients for each namespace.
-	if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && namespace != "" && isReferentSpec(vaultProvider) {
-		keyNamespace = namespace
-	}
-
-	key := cache.Key{
-		Name:      store.GetObjectMeta().Name,
-		Namespace: keyNamespace,
-		Kind:      store.GetTypeMeta().Kind,
-	}
-	if useCache {
-		client, ok := clientCache.Get(store.GetObjectMeta().ResourceVersion, key)
-		if ok {
-			return client, nil
-		}
-	}
-
 	client, err := p.NewVaultClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf(errVaultClient, err)
-	}
-
-	if useCache && !clientCache.Contains(key) {
-		clientCache.Add(store.GetObjectMeta().ResourceVersion, key, client)
 	}
 	return client, nil
 }
@@ -352,16 +324,6 @@ func isReferentSpec(prov *esv1.VaultProvider) bool {
 	return false
 }
 
-func initCache(size int) {
-	logger.Info("initializing vault cache", "size", size)
-	clientCache = cache.Must(size, func(client util.Client) {
-		err := revokeTokenIfValid(context.Background(), client)
-		if err != nil {
-			logger.Error(err, "unable to revoke cached token on eviction")
-		}
-	})
-}
-
 func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, renewalInterval time.Duration) {
 	if enablePooling {
 		logger.Info("initializing vault client pool with caching",
@@ -382,7 +344,10 @@ func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, ren
 
 func init() {
 	var (
-		vaultTokenCacheSize            int
+		// Legacy deprecated flags (only used for deprecation warnings)
+		legacyEnableCache       bool
+		legacyVaultTokenCacheSize int
+		// Current flags
 		enableClientPool               bool
 		enableTokenRenewal             bool
 		tokenRenewalThresholdPercent   int
@@ -391,11 +356,11 @@ func init() {
 
 	fs := pflag.NewFlagSet("vault", pflag.ExitOnError)
 
-	// Legacy cache flags (deprecated, kept for backward compatibility)
-	fs.BoolVar(&enableCache, "experimental-enable-vault-token-cache", false,
-		"DEPRECATED: Use --vault-client-pool instead. Enable experimental Vault token cache.")
-	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize,
-		"DEPRECATED: Maximum size of Vault token cache. Only used if --experimental-enable-vault-token-cache is set.")
+	// Legacy cache flags (deprecated - will be removed in a future release)
+	fs.BoolVar(&legacyEnableCache, "experimental-enable-vault-token-cache", false,
+		"DEPRECATED: This flag is deprecated and will be removed in a future release. Use --vault-client-pool instead.")
+	fs.IntVar(&legacyVaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize,
+		"DEPRECATED: This flag is deprecated and will be removed in a future release. Use --vault-client-pool instead.")
 
 	// New client pool flags
 	fs.BoolVar(&enableClientPool, "vault-client-pool", false,
@@ -403,28 +368,30 @@ func init() {
 	fs.BoolVar(&enableTokenRenewal, "vault-token-renewal", false,
 		"Enable automatic Vault token renewal for pooled clients. Only used if --vault-client-pool is set.")
 	fs.IntVar(&tokenRenewalThresholdPercent, "vault-token-renewal-threshold-percent", 50,
-		"Percentage of token TTL remaining before renewal (1-100). Only used if --vault-token-renewal is set.")
-	fs.StringVar(&tokenRenewalCheckIntervalStr, "vault-token-renewal-check-interval", "1m",
-		"How often to check if tokens need renewal (e.g., '1m', '30s'). Only used if --vault-token-renewal is set.")
+		"Percentage of token TTL remaining before renewal (1-100). When set, overrides --vault-token-renewal-check-interval with a dynamic interval. Only used if --vault-token-renewal is set.")
+	fs.StringVar(&tokenRenewalCheckIntervalStr, "vault-token-renewal-check-interval", "30m",
+		"How often to check if tokens need renewal (e.g., '30m', '1h'). Ignored if --vault-token-renewal-threshold-percent is set. Only used if --vault-token-renewal is set.")
 
 	feature.Register(feature.Feature{
 		Flags: fs,
 		Initialize: func() {
+			// Warn about deprecated flags
+			if legacyEnableCache {
+				logger.Error(nil, "DEPRECATED: --experimental-enable-vault-token-cache is deprecated and will be removed in a future release. Please use --vault-client-pool instead.")
+			}
+			if legacyVaultTokenCacheSize != defaultCacheSize {
+				logger.Error(nil, "DEPRECATED: --experimental-vault-token-cache-size is deprecated and will be removed in a future release. Please use --vault-client-pool instead.")
+			}
+
 			// Parse renewal check interval
 			renewalInterval, err := time.ParseDuration(tokenRenewalCheckIntervalStr)
 			if err != nil {
-				logger.Error(err, "invalid vault-token-renewal-check-interval, using default 1m")
-				renewalInterval = 1 * time.Minute
+				logger.Error(err, "invalid vault-token-renewal-check-interval, using default 30m")
+				renewalInterval = 30 * time.Minute
 			}
 
-			// Initialize the appropriate client pool
-			usePooling := enableClientPool || enableCache
-			initClientPool(usePooling, enableTokenRenewal, tokenRenewalThresholdPercent, renewalInterval)
-
-			// Initialize legacy cache if old flag is used (for backward compatibility)
-			if enableCache && !enableClientPool {
-				initCache(vaultTokenCacheSize)
-			}
+			// Initialize the client pool (no longer using legacy cache)
+			initClientPool(enableClientPool, enableTokenRenewal, tokenRenewalThresholdPercent, renewalInterval)
 		},
 	})
 

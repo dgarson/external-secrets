@@ -28,11 +28,15 @@ import (
 // NoOpClientPool is a ClientPool implementation that provides the current/legacy behavior:
 // - Creates a new Vault client on every AcquireClient call
 // - Performs authentication on every client creation
-// - Revokes token on ReleaseClient (unless it's a static token)
+// - ReleaseClient is a no-op (token revocation is handled by client.Close())
 // - No caching or connection pooling
 //
 // This implementation ensures backward compatibility and identical behavior to the
 // existing code without the client pool abstraction.
+//
+// IMPORTANT: Static tokens (from auth.tokenSecretRef) are NEVER revoked by this pool.
+// Token revocation is handled by client.Close() which has access to the VaultProvider
+// configuration and can properly check if the token is static.
 type NoOpClientPool struct {
 	newVaultClient func(config *vault.Config) (util.Client, error)
 }
@@ -101,24 +105,13 @@ func (p *NoOpClientPool) AcquireClient(ctx context.Context, config AcquireClient
 	return vaultClient, nil
 }
 
-// ReleaseClient revokes the token and cleans up the client.
-// This matches the current behavior in client.Close().
+// ReleaseClient is a no-op for NoOpClientPool.
+// Token revocation is handled by the client.Close() method, which has access to the
+// VaultProvider configuration and can properly check if the token is static (from TokenSecretRef).
+// We intentionally do NOT revoke tokens here to avoid accidentally revoking static tokens,
+// which are managed externally to ESO.
 func (p *NoOpClientPool) ReleaseClient(ctx context.Context, vaultClient util.Client) error {
-	if vaultClient == nil {
-		return nil
-	}
-
-	// Only revoke if we have a token and it wasn't a static token
-	// This logic matches the current client.Close() implementation
-	// Note: We can't determine if it was a static token from just the client,
-	// so this is a best-effort cleanup
-	if vaultClient.Token() != "" {
-		err := revokeTokenIfValid(ctx, vaultClient)
-		if err != nil {
-			return err
-		}
-	}
-
+	// No-op: client cleanup is handled by client.Close() which has proper TokenSecretRef checking
 	return nil
 }
 

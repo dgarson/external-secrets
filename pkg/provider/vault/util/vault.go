@@ -52,6 +52,7 @@ type Client interface {
 	Namespace() string
 	SetNamespace(namespace string)
 	AddHeader(key, value string)
+	GetAddress() string
 }
 
 type VaultClient struct {
@@ -64,6 +65,7 @@ type VaultClient struct {
 	NamespaceFunc    func() string
 	SetNamespaceFunc func(namespace string)
 	AddHeaderFunc    func(key, value string)
+	GetAddressFunc   func() string
 }
 
 type VaultToken struct {
@@ -118,4 +120,8 @@ func (v VaultClient) AuthToken() Token {
 
 func (v VaultClient) Logical() Logical {
 	return v.LogicalField
+}
+
+func (v VaultClient) GetAddress() string {
+	return v.GetAddressFunc()
 }
