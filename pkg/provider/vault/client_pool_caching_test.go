@@ -19,6 +19,7 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,16 +31,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	esmeta "github.com/external-secrets/external-secrets/apis/meta/v1"
+	"github.com/external-secrets/external-secrets/pkg/metrics"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/fake"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 )
 
 // createTestAcquireConfig creates a test AcquireClientConfig with static token auth
 func createTestAcquireConfig(server, namespace string) AcquireClientConfig {
-	// Create fake kube client with required secret
 	kube := clientfake.NewClientBuilder().WithObjects(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "vault-token",
@@ -59,6 +61,40 @@ func createTestAcquireConfig(server, namespace string) AcquireClientConfig {
 					Name:      "vault-token",
 					Namespace: &namespace,
 					Key:       "token",
+				},
+			},
+		},
+		Kube:      kube,
+		Namespace: namespace,
+		StoreKind: esv1.SecretStoreKind,
+	}
+}
+
+// createAppRoleAcquireConfig creates a test AcquireClientConfig for AppRole auth
+func createAppRoleAcquireConfig(server, namespace string) AcquireClientConfig {
+	kube := clientfake.NewClientBuilder().WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "secret",
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"id": []byte("test-secret-id"),
+		},
+	}).Build()
+
+	return AcquireClientConfig{
+		VaultConfig: &vault.Config{},
+		VaultProvider: &esv1.VaultProvider{
+			Server: server,
+			Auth: &esv1.VaultAuth{
+				AppRole: &esv1.VaultAppRole{
+					Path:   "approle",
+					RoleID: "test-role",
+					SecretRef: esmeta.SecretKeySelector{
+						Name:      "secret",
+						Namespace: &namespace,
+						Key:       "id",
+					},
 				},
 			},
 		},
@@ -390,6 +426,115 @@ func TestCachingClientPool_Close(t *testing.T) {
 	assert.Equal(t, int32(1), revokeCallCount.Load(), "token should be revoked on close")
 }
 
+func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
+	var renewAttempts atomic.Int32
+	var clientCreationCount atomic.Int32
+
+	base := fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
+		cl.MockAuthToken = fake.Token{
+			RevokeSelfWithContextFn: func(ctx context.Context, token string) error { return nil },
+			LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
+				return &vault.Secret{
+					Data: map[string]interface{}{
+						"type":         "service",
+						"ttl":          json.Number("10"),
+						"creation_ttl": json.Number("100"),
+						"renewable":    true,
+						"expire_time":  "2099-01-01T00:00:00Z",
+					},
+				}, nil
+			},
+			RenewSelfWithContextFn: func(ctx context.Context, increment int) (*vault.Secret, error) {
+				renewAttempts.Add(1)
+				return nil, errors.New("renewal failed")
+			},
+		}
+	})
+
+	pool := NewCachingClientPool(CachingClientPoolConfig{
+		NewVaultClient: func(config *vault.Config) (util.Client, error) {
+			clientCreationCount.Add(1)
+			return base(config)
+		},
+		EnableRenewal:           true,
+		RenewalCheckInterval:    50 * time.Millisecond,
+		RenewalThresholdPercent: 50,
+		TokenOperationTimeout:   200 * time.Millisecond,
+		MaxCacheSize:            1,
+	})
+	ctx := context.Background()
+
+	config := createAppRoleAcquireConfig("https://vault-renewal.example.com", "renewal-ns")
+	client, err := pool.AcquireClient(ctx, config)
+	require.NoError(t, err)
+	require.NotNil(t, client)
+
+	require.Eventually(t, func() bool {
+		return renewAttempts.Load() >= renewalFailureThreshold
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Allow eviction to process
+	time.Sleep(100 * time.Millisecond)
+
+	newClient, err := pool.AcquireClient(ctx, config)
+	require.NoError(t, err)
+	require.NotNil(t, newClient)
+	assert.NotEqual(t, client, newClient, "client should be evicted and recreated")
+	assert.GreaterOrEqual(t, clientCreationCount.Load(), int32(2), "new client should be constructed after eviction")
+
+	require.NoError(t, pool.ReleaseClient(ctx, client))
+	require.NoError(t, pool.ReleaseClient(ctx, newClient))
+	require.NoError(t, pool.Close(ctx))
+}
+
+func TestCachingClientPool_EvictionWaitsForRelease(t *testing.T) {
+	var revokeCallCount atomic.Int32
+	address := "https://vault-eviction.example.com"
+
+	pool := NewCachingClientPool(CachingClientPoolConfig{
+		NewVaultClient: func(config *vault.Config) (util.Client, error) {
+			client, err := fake.ClientWithLoginMock(config)
+			if err != nil {
+				return nil, err
+			}
+
+			vc := client.(*util.VaultClient)
+			origToken := vc.AuthTokenField
+			vc.AuthTokenField = &util.VaultToken{
+				RevokeSelfFunc: func(ctx context.Context, token string) error {
+					revokeCallCount.Add(1)
+					return nil
+				},
+				LookupSelfFunc: origToken.LookupSelfWithContext,
+				RenewSelfFunc:  origToken.RenewSelfWithContext,
+			}
+
+			return client, nil
+		},
+		EnableRenewal: false,
+		MaxCacheSize:  1,
+	})
+	ctx := context.Background()
+
+	config1 := createAppRoleAcquireConfig(address, "evict-ns1")
+	client1, err := pool.AcquireClient(ctx, config1)
+	require.NoError(t, err)
+	require.NotNil(t, client1)
+
+	config2 := createAppRoleAcquireConfig(address, "evict-ns2")
+	client2, err := pool.AcquireClient(ctx, config2)
+	require.NoError(t, err)
+	require.NotNil(t, client2)
+
+	assert.Equal(t, int32(0), revokeCallCount.Load(), "revocation should be deferred while client is in use")
+
+	require.NoError(t, pool.ReleaseClient(ctx, client1))
+	assert.Equal(t, int32(1), revokeCallCount.Load(), "revocation should occur after final release")
+
+	require.NoError(t, pool.ReleaseClient(ctx, client2))
+	require.NoError(t, pool.Close(ctx))
+}
+
 func TestCachingClientPool_Concurrency(t *testing.T) {
 	var clientCreationCount atomic.Int32
 
@@ -435,4 +580,68 @@ func TestCachingClientPool_Concurrency(t *testing.T) {
 
 	// Should have created only one client despite concurrent requests
 	assert.Equal(t, int32(1), clientCreationCount.Load(), "should create only one client despite concurrent access")
+}
+
+func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
+	address := "https://vault-metrics.example.com"
+	metrics.SetVaultClientPoolSize(address, 0)
+
+	pool := NewCachingClientPool(CachingClientPoolConfig{
+		NewVaultClient: fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
+			cl.MockGetAddress = func() string { return address }
+		}),
+		EnableRenewal: false,
+		MaxCacheSize:  1,
+	})
+	ctx := context.Background()
+
+	config1 := createTestAcquireConfig(address, "metrics-ns1")
+	client1, err := pool.AcquireClient(ctx, config1)
+	require.NoError(t, err)
+	require.NotNil(t, client1)
+	assert.Equal(t, 1.0, getPoolGaugeValue(t, address), "gauge should reflect single client")
+
+	config2 := createTestAcquireConfig(address, "metrics-ns2")
+	client2, err := pool.AcquireClient(ctx, config2)
+	require.NoError(t, err)
+	require.NotNil(t, client2)
+	assert.Equal(t, 1.0, getPoolGaugeValue(t, address), "gauge should stay at size 1 after eviction")
+
+	require.NoError(t, pool.Close(ctx))
+	assert.Equal(t, 0.0, getPoolGaugeValue(t, address), "gauge should reset to zero after close")
+}
+
+func getPoolGaugeValue(t *testing.T, address string) float64 {
+	t.Helper()
+
+	metricFamilies, err := ctrmetrics.Registry.Gather()
+	require.NoError(t, err)
+
+	for _, mf := range metricFamilies {
+		if mf.GetName() != "externalsecret_vault_client_pool_size" {
+			continue
+		}
+		for _, m := range mf.Metric {
+			if m == nil {
+				continue
+			}
+			var addr string
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "address" {
+					addr = l.GetValue()
+					break
+				}
+			}
+			if addr != address {
+				continue
+			}
+			g := m.GetGauge()
+			if g == nil {
+				return 0
+			}
+			return g.GetValue()
+		}
+	}
+
+	return 0
 }

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -31,6 +32,12 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 )
 
+const (
+	minRenewalCheckInterval      = 100 * time.Millisecond
+	defaultTokenOperationTimeout = 5 * time.Second
+	renewalFailureThreshold      = 3
+)
+
 // CachingClientPool is a ClientPool implementation that caches authenticated Vault clients
 // and optionally renews their tokens in the background.
 type CachingClientPool struct {
@@ -39,26 +46,253 @@ type CachingClientPool struct {
 	newVaultClient func(config *vault.Config) (util.Client, error)
 
 	// Token renewal configuration
-	enableRenewal            bool
-	renewalThresholdPercent  int           // Percentage of TTL to use as renewal threshold
-	renewalCheckInterval     time.Duration // Static check interval (used if threshold percent is 0)
+	enableRenewal           bool
+	renewalThresholdPercent int           // Percentage of TTL to use as renewal threshold
+	renewalCheckInterval    time.Duration // Static check interval (used if threshold percent is 0)
 
 	// Cleanup
 	stopChan chan struct{}
 	wg       sync.WaitGroup
+
+	countsMu              sync.Mutex
+	addressCounts         map[string]int
+	tokenOperationTimeout time.Duration
+
+	indexMu     sync.RWMutex
+	clientIndex map[util.Client]*pooledClient
+}
+
+func clampRenewalInterval(d time.Duration) time.Duration {
+	if d < minRenewalCheckInterval {
+		return minRenewalCheckInterval
+	}
+	return d
+}
+
+func jsonNumberToInt64(raw interface{}) (int64, error) {
+	switch v := raw.(type) {
+	case json.Number:
+		return v.Int64()
+	case int64:
+		return v, nil
+	case int:
+		return int64(v), nil
+	case float64:
+		return int64(v), nil
+	default:
+		return 0, fmt.Errorf("unexpected numeric type %T", raw)
+	}
+}
+
+func (p *CachingClientPool) computeRenewalThresholdSeconds(creationTTL int64) (int64, bool) {
+	if p.renewalThresholdPercent <= 0 || creationTTL <= 0 {
+		return 0, false
+	}
+	threshold := (creationTTL * int64(p.renewalThresholdPercent)) / 100
+	if threshold <= 0 {
+		threshold = 1
+	}
+	return threshold, true
+}
+
+func (p *CachingClientPool) trackClientAdded(address string) {
+	if address == "" {
+		return
+	}
+
+	p.countsMu.Lock()
+	defer p.countsMu.Unlock()
+
+	next := p.addressCounts[address] + 1
+	p.addressCounts[address] = next
+	metrics.SetVaultClientPoolSize(address, next)
+}
+
+func (p *CachingClientPool) checkoutClient(pooled *pooledClient) util.Client {
+	if pooled == nil {
+		return nil
+	}
+	pooled.incrementActive()
+	return pooled.client
+}
+
+func (p *CachingClientPool) trackClientRemoved(address string) {
+	if address == "" {
+		return
+	}
+
+	p.countsMu.Lock()
+	defer p.countsMu.Unlock()
+
+	count, ok := p.addressCounts[address]
+	if !ok {
+		return
+	}
+
+	count--
+	if count <= 0 {
+		delete(p.addressCounts, address)
+		metrics.SetVaultClientPoolSize(address, 0)
+		return
+	}
+
+	p.addressCounts[address] = count
+	metrics.SetVaultClientPoolSize(address, count)
+}
+
+func (p *CachingClientPool) registerClient(pooled *pooledClient) {
+	if pooled == nil || pooled.client == nil {
+		return
+	}
+
+	p.indexMu.Lock()
+	p.clientIndex[pooled.client] = pooled
+	p.indexMu.Unlock()
+}
+
+func (p *CachingClientPool) unregisterClient(pooled *pooledClient) {
+	if pooled == nil || pooled.client == nil {
+		return
+	}
+
+	p.indexMu.Lock()
+	delete(p.clientIndex, pooled.client)
+	p.indexMu.Unlock()
+}
+
+func (p *CachingClientPool) operationContext() (context.Context, context.CancelFunc) {
+	timeout := p.tokenOperationTimeout
+	if timeout <= 0 {
+		timeout = defaultTokenOperationTimeout
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
+
+func (p *CachingClientPool) handleEvictedClient(key string, pooled *pooledClient) {
+	if pooled == nil {
+		return
+	}
+
+	pooled.markEvicted()
+	pooled.resetRenewalFailures()
+
+	if pooled.stopRenewal != nil {
+		pooled.stopRenewalOnce.Do(func() {
+			close(pooled.stopRenewal)
+		})
+	}
+
+	address := ""
+	if pooled.client != nil {
+		address = pooled.client.GetAddress()
+	}
+	if address != "" {
+		p.trackClientRemoved(address)
+	}
+
+	remaining := pooled.activeCount()
+	if remaining == 0 {
+		p.finalizePooledClient(pooled)
+	}
+
+	logger.V(1).Info("evicted client from cache", "key", key, "address", address, "active_users", remaining)
+}
+
+func (p *CachingClientPool) finalizePooledClient(pooled *pooledClient) {
+	if pooled == nil {
+		return
+	}
+
+	pooled.finalizeOnce.Do(func() {
+		if pooled.config.VaultProvider != nil && pooled.config.VaultProvider.Auth != nil && pooled.config.VaultProvider.Auth.TokenSecretRef == nil {
+			ctx, cancel := p.operationContext()
+			defer cancel()
+			if err := revokeTokenIfValid(ctx, pooled.client); err != nil {
+				logger.Error(err, "failed to revoke token during finalization", "key", pooled.cacheKey.String())
+			}
+		}
+
+		p.unregisterClient(pooled)
+	})
+}
+
+func (p *CachingClientPool) finalizeAllClients() {
+	p.indexMu.RLock()
+	pooledClients := make([]*pooledClient, 0, len(p.clientIndex))
+	for _, pooled := range p.clientIndex {
+		pooledClients = append(pooledClients, pooled)
+	}
+	p.indexMu.RUnlock()
+
+	for _, pooled := range pooledClients {
+		if pooled == nil {
+			continue
+		}
+		pooled.markEvicted()
+		p.finalizePooledClient(pooled)
+	}
+}
+
+func (p *CachingClientPool) evictPooledClient(pooled *pooledClient) {
+	if pooled == nil {
+		return
+	}
+
+	key := pooled.cacheKey.String()
+	p.mu.Lock()
+	p.cache.Remove(key)
+	p.mu.Unlock()
 }
 
 // pooledClient wraps a Vault client with renewal and lifecycle management.
 type pooledClient struct {
-	client     util.Client
-	config     AcquireClientConfig
-	cacheKey   VaultClientCacheKey
+	client   util.Client
+	config   AcquireClientConfig
+	cacheKey VaultClientCacheKey
 
 	// Token renewal
 	stopRenewal     chan struct{}
 	stopRenewalOnce sync.Once
 	mu              sync.RWMutex
 	lastRenewed     time.Time
+
+	activeUsers         int32
+	renewalFailureCount int32
+	evicted             int32
+	finalizeOnce        sync.Once
+}
+
+func (p *pooledClient) incrementActive() {
+	atomic.AddInt32(&p.activeUsers, 1)
+}
+
+func (p *pooledClient) decrementActive() int32 {
+	newVal := atomic.AddInt32(&p.activeUsers, -1)
+	if newVal < 0 {
+		atomic.StoreInt32(&p.activeUsers, 0)
+		return 0
+	}
+	return newVal
+}
+
+func (p *pooledClient) activeCount() int32 {
+	return atomic.LoadInt32(&p.activeUsers)
+}
+
+func (p *pooledClient) markEvicted() {
+	atomic.StoreInt32(&p.evicted, 1)
+}
+
+func (p *pooledClient) isEvicted() bool {
+	return atomic.LoadInt32(&p.evicted) == 1
+}
+
+func (p *pooledClient) incrementRenewalFailure() int32 {
+	return atomic.AddInt32(&p.renewalFailureCount, 1)
+}
+
+func (p *pooledClient) resetRenewalFailures() {
+	atomic.StoreInt32(&p.renewalFailureCount, 0)
 }
 
 // CachingClientPoolConfig configures the caching client pool.
@@ -79,6 +313,10 @@ type CachingClientPoolConfig struct {
 	// Ignored if RenewalThresholdPercent is set, as the check interval will be dynamically calculated
 	RenewalCheckInterval time.Duration
 
+	// TokenOperationTimeout bounds Vault token lookup/renew/revoke operations
+	// Default: 5 seconds
+	TokenOperationTimeout time.Duration
+
 	// MaxCacheSize is the maximum number of clients to cache
 	// Default: 1000
 	MaxCacheSize int
@@ -92,43 +330,36 @@ func NewCachingClientPool(config CachingClientPoolConfig) *CachingClientPool {
 	if config.RenewalCheckInterval == 0 {
 		config.RenewalCheckInterval = 30 * time.Minute
 	}
+	config.RenewalCheckInterval = clampRenewalInterval(config.RenewalCheckInterval)
 	if config.RenewalThresholdPercent == 0 {
 		config.RenewalThresholdPercent = 50
 	}
 	if config.MaxCacheSize == 0 {
 		config.MaxCacheSize = 1000
 	}
-
-	// Create LRU cache with eviction callback
-	cache, err := lru.NewWithEvict(config.MaxCacheSize, func(key string, pooled *pooledClient) {
-		// Stop renewal goroutine (using sync.Once to prevent double-close)
-		if pooled.stopRenewal != nil {
-			pooled.stopRenewalOnce.Do(func() {
-				close(pooled.stopRenewal)
-			})
-		}
-		// Revoke token if not static (i.e., NOT from auth.tokenSecretRef)
-		// IMPORTANT: We NEVER revoke static tokens as they are managed externally to ESO
-		if pooled.config.VaultProvider.Auth != nil && pooled.config.VaultProvider.Auth.TokenSecretRef == nil {
-			ctx := context.Background()
-			if err := revokeTokenIfValid(ctx, pooled.client); err != nil {
-				logger.Error(err, "failed to revoke token during eviction", "key", key)
-			}
-		}
-		logger.V(1).Info("evicted client from cache", "key", key)
-	})
-	if err != nil {
-		panic(fmt.Sprintf("failed to create LRU cache: %v", err))
+	if config.TokenOperationTimeout == 0 {
+		config.TokenOperationTimeout = defaultTokenOperationTimeout
 	}
 
 	pool := &CachingClientPool{
-		cache:                   cache,
 		newVaultClient:          config.NewVaultClient,
 		enableRenewal:           config.EnableRenewal,
 		renewalThresholdPercent: config.RenewalThresholdPercent,
 		renewalCheckInterval:    config.RenewalCheckInterval,
 		stopChan:                make(chan struct{}),
+		addressCounts:           make(map[string]int),
+		tokenOperationTimeout:   config.TokenOperationTimeout,
+		clientIndex:             make(map[util.Client]*pooledClient),
 	}
+
+	cache, err := lru.NewWithEvict(config.MaxCacheSize, func(key string, pooled *pooledClient) {
+		pool.handleEvictedClient(key, pooled)
+	})
+	if err != nil {
+		panic(fmt.Sprintf("failed to create LRU cache: %v", err))
+	}
+
+	pool.cache = cache
 
 	return pool
 }
@@ -154,7 +385,7 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 		if err == nil && valid {
 			logger.V(1).Info("reusing cached vault client", "key", keyStr)
 			metrics.ObserveVaultClientPoolOperation("cache_hit", pooled.client.GetAddress(), nil)
-			return pooled.client, nil
+			return p.checkoutClient(pooled), nil
 		}
 
 		// Token is invalid, try to re-authenticate with fresh credentials from current config
@@ -174,7 +405,7 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 			}
 		} else {
 			// Re-authentication succeeded
-			return pooled.client, nil
+			return p.checkoutClient(pooled), nil
 		}
 	}
 
@@ -188,7 +419,7 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 		if err == nil && valid {
 			logger.V(1).Info("reusing cached vault client (double-check)", "key", keyStr)
 			metrics.ObserveVaultClientPoolOperation("cache_hit", pooled.client.GetAddress(), nil)
-			return pooled.client, nil
+			return p.checkoutClient(pooled), nil
 		}
 		// If invalid, fall through to create new client
 	}
@@ -260,15 +491,30 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 	// Add to cache (we're already holding the write lock)
 	// The Add method will automatically evict the LRU item if cache is full
 	p.cache.Add(keyStr, pooled)
-	metrics.SetVaultClientPoolSize(vaultClient.GetAddress(), p.cache.Len())
+	p.registerClient(pooled)
+	p.trackClientAdded(address)
 
-	return vaultClient, nil
+	return p.checkoutClient(pooled), nil
 }
 
-// ReleaseClient is a no-op for caching pool - clients remain cached.
+// ReleaseClient decrements the usage count for the provided client.
 func (p *CachingClientPool) ReleaseClient(ctx context.Context, client util.Client) error {
-	// For caching pool, we don't release clients immediately
-	// They stay in cache until evicted or pool is closed
+	if client == nil {
+		return nil
+	}
+
+	p.indexMu.RLock()
+	pooled, ok := p.clientIndex[client]
+	p.indexMu.RUnlock()
+	if !ok {
+		return nil
+	}
+
+	remaining := pooled.decrementActive()
+	if remaining == 0 && pooled.isEvicted() {
+		p.finalizePooledClient(pooled)
+	}
+
 	return nil
 }
 
@@ -300,6 +546,8 @@ func (p *CachingClientPool) Close(ctx context.Context) error {
 	p.cache.Purge()
 	p.mu.Unlock()
 
+	p.finalizeAllClients()
+
 	metrics.ObserveVaultClientPoolOperation("pool_closed", "", nil)
 	return nil
 }
@@ -321,7 +569,15 @@ func (p *CachingClientPool) renewalLoop(pooled *pooledClient) {
 			return
 		case <-ticker.C:
 			if err := p.checkAndRenew(pooled); err != nil {
-				logger.Error(err, "failed to renew token", "key", pooled.cacheKey.String())
+				count := pooled.incrementRenewalFailure()
+				logger.Error(err, "failed to renew token", "key", pooled.cacheKey.String(), "attempt", count)
+				if count >= renewalFailureThreshold {
+					logger.Error(err, "evicting pooled client after repeated renewal failures", "key", pooled.cacheKey.String())
+					p.evictPooledClient(pooled)
+					return
+				}
+			} else {
+				pooled.resetRenewalFailures()
 			}
 			// Recalculate check interval after renewal (token TTL may have changed)
 			newInterval := p.calculateCheckInterval(pooled)
@@ -337,51 +593,64 @@ func (p *CachingClientPool) renewalLoop(pooled *pooledClient) {
 // If renewalThresholdPercent is set AND is not the default 50%, it calculates the interval dynamically based on token TTL.
 // Otherwise, it uses the static renewalCheckInterval.
 func (p *CachingClientPool) calculateCheckInterval(pooled *pooledClient) time.Duration {
-	// Use static interval if threshold is 0 or if RenewalCheckInterval was explicitly provided
-	// We detect explicit provision by checking if it's not the default 30 minutes
-	if p.renewalThresholdPercent == 0 || p.renewalCheckInterval != 30*time.Minute {
-		return p.renewalCheckInterval
+	// If threshold-based scheduling is disabled, fall back to the static interval.
+	if p.renewalThresholdPercent <= 0 {
+		return clampRenewalInterval(p.renewalCheckInterval)
 	}
 
-	// Fetch token TTL to calculate dynamic interval
-	ctx := context.Background()
+	ctx, cancel := p.operationContext()
+	defer cancel()
 	resp, err := pooled.client.AuthToken().LookupSelfWithContext(ctx)
 	if err != nil {
 		logger.V(1).Info("failed to lookup token for dynamic interval calculation, using static interval", "err", err)
-		return p.renewalCheckInterval
+		return clampRenewalInterval(p.renewalCheckInterval)
 	}
 
 	if resp == nil || resp.Data == nil {
-		return p.renewalCheckInterval
+		return clampRenewalInterval(p.renewalCheckInterval)
+	}
+
+	ttlRaw, ok := resp.Data["ttl"]
+	if !ok {
+		return clampRenewalInterval(p.renewalCheckInterval)
+	}
+	ttlSeconds, err := jsonNumberToInt64(ttlRaw)
+	if err != nil {
+		logger.V(1).Info("failed to parse ttl for dynamic interval calculation, using static interval", "err", err)
+		return clampRenewalInterval(p.renewalCheckInterval)
 	}
 
 	creationTTLRaw, ok := resp.Data["creation_ttl"]
 	if !ok {
-		return p.renewalCheckInterval
+		return clampRenewalInterval(p.renewalCheckInterval)
 	}
-
-	creationTTL, err := creationTTLRaw.(json.Number).Int64()
+	creationTTL, err := jsonNumberToInt64(creationTTLRaw)
 	if err != nil {
-		return p.renewalCheckInterval
+		logger.V(1).Info("failed to parse creation_ttl for dynamic interval calculation, using static interval", "err", err)
+		return clampRenewalInterval(p.renewalCheckInterval)
 	}
 
-	// Calculate the interval as the percentage of the token's creation TTL
-	// For example, if threshold is 50% and TTL is 1h (3600s), check every 30m (1800s)
-	ttlDuration := time.Duration(creationTTL) * time.Second
-	dynamicInterval := (ttlDuration * time.Duration(p.renewalThresholdPercent)) / 100
-
-	// Ensure a reasonable minimum interval (100ms for very short-lived tokens or tests)
-	if dynamicInterval < 100*time.Millisecond {
-		dynamicInterval = 100 * time.Millisecond
+	thresholdSeconds, ok := p.computeRenewalThresholdSeconds(creationTTL)
+	if !ok {
+		return clampRenewalInterval(p.renewalCheckInterval)
 	}
+
+	intervalSeconds := ttlSeconds - thresholdSeconds
+	if intervalSeconds <= 0 {
+		return minRenewalCheckInterval
+	}
+
+	interval := time.Duration(intervalSeconds) * time.Second
+	interval = clampRenewalInterval(interval)
 
 	logger.V(1).Info("calculated dynamic renewal check interval",
 		"key", pooled.cacheKey.String(),
 		"creation_ttl", creationTTL,
+		"current_ttl", ttlSeconds,
 		"threshold_percent", p.renewalThresholdPercent,
-		"interval", dynamicInterval)
+		"interval", interval)
 
-	return dynamicInterval
+	return interval
 }
 
 // checkAndRenew checks if a token needs renewal and renews it if necessary.
@@ -389,9 +658,9 @@ func (p *CachingClientPool) checkAndRenew(pooled *pooledClient) error {
 	pooled.mu.Lock()
 	defer pooled.mu.Unlock()
 
-	ctx := context.Background()
+	ctx, cancel := p.operationContext()
+	defer cancel()
 
-	// Check token status
 	resp, err := pooled.client.AuthToken().LookupSelfWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to lookup token: %w", err)
@@ -401,60 +670,68 @@ func (p *CachingClientPool) checkAndRenew(pooled *pooledClient) error {
 		return fmt.Errorf("invalid token lookup response")
 	}
 
-	// Check if token is renewable
-	renewable, ok := resp.Data["renewable"]
-	if !ok || !renewable.(bool) {
-		// Token is not renewable, nothing to do
+	renewableRaw, ok := resp.Data["renewable"]
+	if !ok {
+		pooled.resetRenewalFailures()
+		return nil
+	}
+	renewable, ok := renewableRaw.(bool)
+	if !ok || !renewable {
+		pooled.resetRenewalFailures()
 		return nil
 	}
 
-	// Get TTL
 	ttlRaw, ok := resp.Data["ttl"]
 	if !ok {
 		return fmt.Errorf("no TTL in token response")
 	}
-
-	ttl, err := ttlRaw.(json.Number).Int64()
+	ttlSeconds, err := jsonNumberToInt64(ttlRaw)
 	if err != nil {
 		return fmt.Errorf("invalid TTL: %w", err)
 	}
 
-	// Get creation TTL to calculate threshold
 	creationTTLRaw, ok := resp.Data["creation_ttl"]
 	if !ok {
 		return fmt.Errorf("no creation_ttl in token response")
 	}
-
-	creationTTL, err := creationTTLRaw.(json.Number).Int64()
+	creationTTL, err := jsonNumberToInt64(creationTTLRaw)
 	if err != nil {
 		return fmt.Errorf("invalid creation_ttl: %w", err)
 	}
 
-	// Calculate renewal threshold (50% of original TTL by default)
-	threshold := creationTTL / 2
-
-	// Renew if below threshold
-	if ttl < threshold {
-		logger.V(1).Info("renewing token", "key", pooled.cacheKey.String(), "ttl", ttl, "threshold", threshold)
-
-		start := time.Now()
-		_, err := pooled.client.AuthToken().RenewSelfWithContext(ctx, 0) // 0 means use default increment
-		duration := time.Since(start).Seconds()
-
-		address := pooled.client.GetAddress()
-		metrics.ObserveVaultTokenRenewal(address, err)
-		if err == nil {
-			metrics.ObserveVaultTokenRenewalDuration(address, duration)
+	thresholdSeconds, ok := p.computeRenewalThresholdSeconds(creationTTL)
+	if !ok {
+		fallbackThreshold := clampRenewalInterval(p.renewalCheckInterval)
+		thresholdSeconds = int64(fallbackThreshold / time.Second)
+		if thresholdSeconds <= 0 {
+			thresholdSeconds = 1
 		}
-
-		if err != nil {
-			return fmt.Errorf("failed to renew token: %w", err)
-		}
-
-		pooled.lastRenewed = time.Now()
-		logger.V(1).Info("token renewed successfully", "key", pooled.cacheKey.String())
 	}
 
+	if ttlSeconds > thresholdSeconds {
+		pooled.resetRenewalFailures()
+		return nil
+	}
+
+	logger.V(1).Info("renewing token", "key", pooled.cacheKey.String(), "ttl", ttlSeconds, "threshold", thresholdSeconds)
+
+	start := time.Now()
+	_, err = pooled.client.AuthToken().RenewSelfWithContext(ctx, 0)
+	duration := time.Since(start).Seconds()
+
+	address := pooled.client.GetAddress()
+	metrics.ObserveVaultTokenRenewal(address, err)
+	if err == nil {
+		metrics.ObserveVaultTokenRenewalDuration(address, duration)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to renew token: %w", err)
+	}
+
+	pooled.lastRenewed = time.Now()
+	pooled.resetRenewalFailures()
+	logger.V(1).Info("token renewed successfully", "key", pooled.cacheKey.String())
 	return nil
 }
 
@@ -480,7 +757,13 @@ func (p *CachingClientPool) reauthenticate(ctx context.Context, pooled *pooledCl
 		log:       logger,
 	}
 
-	if err := c.setAuth(ctx, currentConfig.VaultConfig); err != nil {
+	timeout := p.tokenOperationTimeout
+	if timeout <= 0 {
+		timeout = defaultTokenOperationTimeout
+	}
+	reauthCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.setAuth(reauthCtx, currentConfig.VaultConfig); err != nil {
 		return fmt.Errorf("failed to re-authenticate: %w", err)
 	}
 
