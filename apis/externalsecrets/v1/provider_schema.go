@@ -99,6 +99,18 @@ func GetProvider(s GenericStore) (Provider, error) {
 	return f, nil
 }
 
+// GetProviderName returns the provider name from the generic store.
+func GetProviderName(s GenericStore) (string, error) {
+	if s == nil {
+		return "", nil
+	}
+	spec := s.GetSpec()
+	if spec == nil {
+		return "", fmt.Errorf("no spec found in %#v", s)
+	}
+	return getProviderName(spec.Provider)
+}
+
 // getProviderName returns the name of the configured provider
 // or an error if the provider is not configured.
 func getProviderName(storeSpec *SecretStoreProvider) (string, error) {

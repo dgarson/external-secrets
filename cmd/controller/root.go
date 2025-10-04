@@ -47,6 +47,7 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/controllers/externalsecret/esmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/generatorstate"
 	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
+	"github.com/external-secrets/external-secrets/pkg/metrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/pushsecret"
 	"github.com/external-secrets/external-secrets/pkg/controllers/pushsecret/psmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore"
@@ -90,6 +91,7 @@ var (
 	enableFloodGate                       bool
 	enableGeneratorState                  bool
 	enableExtendedMetricLabels            bool
+	enableGranularMetrics                 bool
 	storeRequeueInterval                  time.Duration
 	serviceName, serviceNamespace         string
 	secretName, secretNamespace           string
@@ -125,6 +127,8 @@ var rootCmd = &cobra.Command{
 		setupLogger()
 
 		ctrlmetrics.SetUpLabelNames(enableExtendedMetricLabels)
+		ctrlmetrics.SetEnableGranularMetrics(enableGranularMetrics)
+		metrics.SetUpMetrics()
 		esmetrics.SetUpMetrics()
 		config := ctrl.GetConfigOrDie()
 		config.QPS = clientQPS
@@ -361,6 +365,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&enableFloodGate, "enable-flood-gate", true, "Enable flood gate. External secret will be reconciled only if the ClusterStore or Store have an healthy or unknown state.")
 	rootCmd.Flags().BoolVar(&enableGeneratorState, "enable-generator-state", true, "Whether the Controller should manage GeneratorState")
 	rootCmd.Flags().BoolVar(&enableExtendedMetricLabels, "enable-extended-metric-labels", false, "Enable recommended kubernetes annotations as labels in metrics.")
+	rootCmd.Flags().BoolVar(&enableGranularMetrics, "enable-granular-metrics", false, "Enable granular metric labels (SecretStore references, provider types, error categories). May increase cardinality.")
 	rootCmd.Flags().BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics server")
 	fs := feature.Features()

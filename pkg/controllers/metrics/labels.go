@@ -30,12 +30,20 @@ var (
 	NonConditionMetricLabels = make(map[string]string)
 
 	ConditionMetricLabels = make(map[string]string)
+
+	// EnableGranularMetrics controls whether granular labels (SecretStore refs, provider types, error categories) are added to metrics
+	EnableGranularMetrics = false
 )
 
 var nonAlphanumericRegex *regexp.Regexp
 
 func init() {
 	nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
+}
+
+// SetEnableGranularMetrics sets whether granular metrics should be enabled
+func SetEnableGranularMetrics(enabled bool) {
+	EnableGranularMetrics = enabled
 }
 
 // SetUpLabelNames initializes both non-conditional and conditional metric labels and label names.
@@ -100,4 +108,102 @@ func RefineNonConditionMetricLabels(labels map[string]string) prometheus.Labels 
 
 func RefineConditionMetricLabels(labels map[string]string) prometheus.Labels {
 	return RefineLabels(ConditionMetricLabels, labels)
+}
+
+// WithGranularLabels returns a new slice with base labels plus optional granular labels.
+// Only adds granular labels if EnableGranularMetrics is true.
+// Always returns a copy to prevent accidental mutation of the base slice.
+func WithGranularLabels(baseLabels []string, granularLabels ...string) []string {
+	if !EnableGranularMetrics || len(granularLabels) == 0 {
+		// Return copy to avoid accidental mutation
+		result := make([]string, len(baseLabels))
+		copy(result, baseLabels)
+		return result
+	}
+
+	result := make([]string, len(baseLabels), len(baseLabels)+len(granularLabels))
+	copy(result, baseLabels)
+	return append(result, granularLabels...)
+}
+
+// AddStoreRefLabels adds SecretStore reference labels if granular metrics is enabled.
+// For ClusterSecretStore (kind=="ClusterSecretStore"), namespace is set to empty string.
+func AddStoreRefLabels(labels prometheus.Labels, storeName, storeKind, namespace string) prometheus.Labels {
+	if !EnableGranularMetrics {
+		return labels
+	}
+
+	storeNamespace := namespace
+	if storeKind == "ClusterSecretStore" {
+		storeNamespace = ""
+	}
+
+	return RefineLabels(labels, map[string]string{
+		"secretstore_name":      storeName,
+		"secretstore_namespace": storeNamespace,
+	})
+}
+
+// AddProviderTypeLabel adds provider type label if granular metrics is enabled.
+func AddProviderTypeLabel(labels prometheus.Labels, providerType string) prometheus.Labels {
+	if !EnableGranularMetrics || providerType == "" {
+		return labels
+	}
+
+	return RefineLabels(labels, map[string]string{
+		"provider_type": providerType,
+	})
+}
+
+// Provider operation constants for store API call metrics.
+// These ensure consistent operation names across controllers.
+const (
+	OperationGetSecret     = "GetSecret"
+	OperationGetSecretMap  = "GetSecretMap"
+	OperationGetAllSecrets = "GetAllSecrets"
+	OperationPushSecret    = "PushSecret"
+	OperationDeleteSecret  = "DeleteSecret"
+	OperationSecretExists  = "SecretExists"
+	OperationValidate      = "Validate"
+)
+
+// StoreMetricsRecorder helps record provider API call metrics for a specific SecretStore.
+// It encapsulates store context to avoid duplicating metric recording code across controllers.
+type StoreMetricsRecorder struct {
+	storeName      string
+	storeKind      string
+	storeNamespace string
+	providerType   string
+}
+
+// NewStoreMetricsRecorder creates a metrics recorder for the given SecretStore or ClusterSecretStore.
+// The recorder can be used to consistently record provider API operations for that store.
+func NewStoreMetricsRecorder(storeName, storeKind, storeNamespace, providerType string) *StoreMetricsRecorder {
+	return &StoreMetricsRecorder{
+		storeName:      storeName,
+		storeKind:      storeKind,
+		storeNamespace: storeNamespace,
+		providerType:   providerType,
+	}
+}
+
+// Observe records a provider API operation for this SecretStore.
+// Only records when EnableGranularMetrics is true.
+func (r *StoreMetricsRecorder) Observe(operation string, err error) {
+	if !EnableGranularMetrics || r == nil {
+		return
+	}
+
+	if observeStoreAPICallFunc != nil {
+		observeStoreAPICallFunc(r.storeName, r.storeKind, r.storeNamespace, r.providerType, operation, err)
+	}
+}
+
+// observeStoreAPICallFunc is a callback to record store API calls.
+// This is set by the metrics package to avoid import cycles.
+var observeStoreAPICallFunc func(storeName, storeKind, storeNamespace, provider, call string, err error)
+
+// SetObserveStoreAPICallFunc sets the callback for recording store API calls.
+func SetObserveStoreAPICallFunc(fn func(storeName, storeKind, storeNamespace, provider, call string, err error)) {
+	observeStoreAPICallFunc = fn
 }

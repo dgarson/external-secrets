@@ -31,7 +31,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	esapi "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
+	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
 )
 
 const (
@@ -103,38 +105,57 @@ func (m *Manager) GetFromStore(ctx context.Context, store esv1.GenericStore, nam
 	return secretClient, nil
 }
 
-// Get returns a provider client from the given storeRef or sourceRef.secretStoreRef
+// Get returns a provider client and metrics recorder from the given storeRef or sourceRef.secretStoreRef
 // while sourceRef.SecretStoreRef takes precedence over storeRef.
-// Do not close the client returned from this func, instead close
-// the manager once you're done with recinciling the external secret.
-func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespace string, sourceRef *esv1.StoreGeneratorSourceRef) (esv1.SecretsClient, error) {
+// The metrics recorder can be used to track API calls by SecretStore dimension when granular metrics are enabled.
+// Do not close the client returned from this func, instead close the manager once you're done with reconciling.
+func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespace string, sourceRef *esv1.StoreGeneratorSourceRef) (esv1.SecretsClient, *ctrlmetrics.StoreMetricsRecorder, error) {
 	if sourceRef != nil && sourceRef.SecretStoreRef != nil {
 		storeRef = *sourceRef.SecretStoreRef
 	}
 	store, err := m.getStore(ctx, &storeRef, namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// check if store should be handled by this controller instance
 	if !ShouldProcessStore(store, m.controllerClass) {
-		return nil, errors.New("can not reference unmanaged store")
+		return nil, nil, errors.New("can not reference unmanaged store")
 	}
 	// when using ClusterSecretStore, validate the ClusterSecretStore namespace conditions
 	shouldProcess, err := m.shouldProcessSecret(store, namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !shouldProcess {
-		return nil, fmt.Errorf(errClusterStoreMismatch, store.GetName(), namespace)
+		return nil, nil, fmt.Errorf(errClusterStoreMismatch, store.GetName(), namespace)
 	}
 
 	if m.enableFloodgate {
 		err := assertStoreIsUsable(store)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return m.GetFromStore(ctx, store, namespace)
+
+	client, err := m.GetFromStore(ctx, store, namespace)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create metrics recorder
+	providerType, _ := esapi.GetProviderName(store)
+	storeKind := "SecretStore"
+	if store.GetNamespace() == "" {
+		storeKind = "ClusterSecretStore"
+	}
+	recorder := ctrlmetrics.NewStoreMetricsRecorder(
+		store.GetName(),
+		storeKind,
+		store.GetNamespace(),
+		providerType,
+	)
+
+	return client, recorder, nil
 }
 
 // returns a previously stored client from the cache if store and store-version match

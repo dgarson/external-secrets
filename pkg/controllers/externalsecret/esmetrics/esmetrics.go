@@ -40,30 +40,40 @@ var gaugeVecMetrics = map[string]*prometheus.GaugeVec{}
 // Called at the root to set-up the metric logic using the
 // config flags provided.
 func SetUpMetrics() {
+	// Get label sets with optional granular labels
+	nonConditionLabels := ctrlmetrics.WithGranularLabels(
+		ctrlmetrics.NonConditionMetricLabelNames,
+		"secretstore_name", "secretstore_namespace",
+	)
+	conditionLabels := ctrlmetrics.WithGranularLabels(
+		ctrlmetrics.ConditionMetricLabelNames,
+		"secretstore_name", "secretstore_namespace",
+	)
+
 	// Obtain the prometheus metrics and register
 	syncCallsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      SyncCallsKey,
 		Help:      "Total number of the External Secret sync calls",
-	}, ctrlmetrics.NonConditionMetricLabelNames)
+	}, nonConditionLabels)
 
 	syncCallsError := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      SyncCallsErrorKey,
 		Help:      "Total number of the External Secret sync errors",
-	}, ctrlmetrics.NonConditionMetricLabelNames)
+	}, nonConditionLabels)
 
 	externalSecretCondition := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      ExternalSecretStatusConditionKey,
 		Help:      "The status condition of a specific External Secret",
-	}, ctrlmetrics.ConditionMetricLabelNames)
+	}, conditionLabels)
 
 	externalSecretReconcileDuration := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      ExternalSecretReconcileDurationKey,
 		Help:      "The duration time to reconcile the External Secret",
-	}, ctrlmetrics.NonConditionMetricLabelNames)
+	}, nonConditionLabels)
 
 	metrics.Registry.MustRegister(syncCallsTotal, syncCallsError, externalSecretCondition, externalSecretReconcileDuration)
 
@@ -85,7 +95,16 @@ func UpdateExternalSecretCondition(es *esv1.ExternalSecret, condition *esv1.Exte
 	for k, v := range es.Labels {
 		esInfo[k] = v
 	}
+
 	conditionLabels := ctrlmetrics.RefineConditionMetricLabels(esInfo)
+
+	// Add SecretStore reference labels if granular metrics is enabled
+	conditionLabels = ctrlmetrics.AddStoreRefLabels(
+		conditionLabels,
+		es.Spec.SecretStoreRef.Name,
+		es.Spec.SecretStoreRef.Kind,
+		es.Namespace,
+	)
 	externalSecretCondition := GetGaugeVec(ExternalSecretStatusConditionKey)
 
 	switch condition.Type {

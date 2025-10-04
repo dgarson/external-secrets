@@ -69,6 +69,11 @@ func (r *ClusterStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// Add provider_type label if granular metrics is enabled
+	if providerName, err := esapi.GetProviderName(&css); err == nil {
+		resourceLabels = ctrlmetrics.AddProviderTypeLabel(resourceLabels, providerName)
+	}
+
 	return reconcile(ctx, req, &css, r.Client, r.PushSecretEnabled, log, Opts{
 		ControllerClass: r.ControllerClass,
 		GaugeVecGetter:  cssmetrics.GetGaugeVec,

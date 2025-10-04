@@ -199,3 +199,163 @@ func TestRefineLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestStoreMetricsRecorder_Observe(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	origCallback := observeStoreAPICallFunc
+	defer func() {
+		EnableGranularMetrics = origEnabled
+		observeStoreAPICallFunc = origCallback
+	}()
+
+	testCases := []struct {
+		description         string
+		enableGranular      bool
+		recorder            *StoreMetricsRecorder
+		operation           string
+		err                 error
+		setupCallback       bool
+		expectedCallbackRun bool
+		expectedStoreName   string
+		expectedStoreKind   string
+		expectedNamespace   string
+		expectedProvider    string
+		expectedOperation   string
+	}{
+		{
+			description:    "Granular metrics disabled - callback not run",
+			enableGranular: false,
+			recorder: &StoreMetricsRecorder{
+				storeName:      "test-store",
+				storeKind:      "SecretStore",
+				storeNamespace: "default",
+				providerType:   "vault",
+			},
+			operation:           OperationGetSecret,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: false,
+		},
+		{
+			description:    "Granular metrics enabled - SecretStore",
+			enableGranular: true,
+			recorder: &StoreMetricsRecorder{
+				storeName:      "test-store",
+				storeKind:      "SecretStore",
+				storeNamespace: "default",
+				providerType:   "vault",
+			},
+			operation:           OperationGetSecret,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: true,
+			expectedStoreName:   "test-store",
+			expectedStoreKind:   "SecretStore",
+			expectedNamespace:   "default",
+			expectedProvider:    "vault",
+			expectedOperation:   OperationGetSecret,
+		},
+		{
+			description:    "Granular metrics enabled - ClusterSecretStore",
+			enableGranular: true,
+			recorder: &StoreMetricsRecorder{
+				storeName:      "cluster-store",
+				storeKind:      "ClusterSecretStore",
+				storeNamespace: "",
+				providerType:   "aws",
+			},
+			operation:           OperationPushSecret,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: true,
+			expectedStoreName:   "cluster-store",
+			expectedStoreKind:   "ClusterSecretStore",
+			expectedNamespace:   "",
+			expectedProvider:    "aws",
+			expectedOperation:   OperationPushSecret,
+		},
+		{
+			description:         "Nil recorder - no panic",
+			enableGranular:      true,
+			recorder:            nil,
+			operation:           OperationValidate,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			EnableGranularMetrics = tc.enableGranular
+
+			callbackRun := false
+			var capturedStoreName, capturedStoreKind, capturedNamespace, capturedProvider, capturedOperation string
+			var capturedErr error
+
+			if tc.setupCallback {
+				observeStoreAPICallFunc = func(storeName, storeKind, storeNamespace, provider, call string, err error) {
+					callbackRun = true
+					capturedStoreName = storeName
+					capturedStoreKind = storeKind
+					capturedNamespace = storeNamespace
+					capturedProvider = provider
+					capturedOperation = call
+					capturedErr = err
+				}
+			} else {
+				observeStoreAPICallFunc = nil
+			}
+
+			// Execute
+			tc.recorder.Observe(tc.operation, tc.err)
+
+			// Verify
+			if callbackRun != tc.expectedCallbackRun {
+				t.Errorf("Expected callback run=%v, got=%v", tc.expectedCallbackRun, callbackRun)
+			}
+
+			if tc.expectedCallbackRun {
+				if capturedStoreName != tc.expectedStoreName {
+					t.Errorf("Expected storeName=%q, got=%q", tc.expectedStoreName, capturedStoreName)
+				}
+				if capturedStoreKind != tc.expectedStoreKind {
+					t.Errorf("Expected storeKind=%q, got=%q", tc.expectedStoreKind, capturedStoreKind)
+				}
+				if capturedNamespace != tc.expectedNamespace {
+					t.Errorf("Expected namespace=%q, got=%q", tc.expectedNamespace, capturedNamespace)
+				}
+				if capturedProvider != tc.expectedProvider {
+					t.Errorf("Expected provider=%q, got=%q", tc.expectedProvider, capturedProvider)
+				}
+				if capturedOperation != tc.expectedOperation {
+					t.Errorf("Expected operation=%q, got=%q", tc.expectedOperation, capturedOperation)
+				}
+				if capturedErr != tc.err {
+					t.Errorf("Expected err=%v, got=%v", tc.err, capturedErr)
+				}
+			}
+		})
+	}
+}
+
+func TestNewStoreMetricsRecorder(t *testing.T) {
+	recorder := NewStoreMetricsRecorder("my-store", "SecretStore", "default", "vault")
+
+	if recorder == nil {
+		t.Fatal("Expected non-nil recorder")
+	}
+	if recorder.storeName != "my-store" {
+		t.Errorf("Expected storeName=my-store, got=%s", recorder.storeName)
+	}
+	if recorder.storeKind != "SecretStore" {
+		t.Errorf("Expected storeKind=SecretStore, got=%s", recorder.storeKind)
+	}
+	if recorder.storeNamespace != "default" {
+		t.Errorf("Expected storeNamespace=default, got=%s", recorder.storeNamespace)
+	}
+	if recorder.providerType != "vault" {
+		t.Errorf("Expected providerType=vault, got=%s", recorder.providerType)
+	}
+}

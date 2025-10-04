@@ -36,17 +36,27 @@ var gaugeVecMetrics = map[string]*prometheus.GaugeVec{}
 // SetUpMetrics is called at the root to set-up the metric logic using the
 // config flags provided.
 func SetUpMetrics() {
+	// Get label sets with optional granular labels
+	nonConditionLabels := ctrlmetrics.WithGranularLabels(
+		ctrlmetrics.NonConditionMetricLabelNames,
+		"secretstore_name", "secretstore_namespace",
+	)
+	conditionLabels := ctrlmetrics.WithGranularLabels(
+		ctrlmetrics.ConditionMetricLabelNames,
+		"secretstore_name", "secretstore_namespace",
+	)
+
 	pushSecretCondition := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: PushSecretSubsystem,
 		Name:      PushSecretStatusConditionKey,
 		Help:      "The status condition of a specific Push Secret",
-	}, ctrlmetrics.ConditionMetricLabelNames)
+	}, conditionLabels)
 
 	pushSecretReconcileDuration := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: PushSecretSubsystem,
 		Name:      PushSecretReconcileDurationKey,
 		Help:      "The duration time to reconcile the Push Secret",
-	}, ctrlmetrics.NonConditionMetricLabelNames)
+	}, nonConditionLabels)
 
 	metrics.Registry.MustRegister(pushSecretReconcileDuration, pushSecretCondition)
 
@@ -63,7 +73,18 @@ func UpdatePushSecretCondition(ps *esapi.PushSecret, condition *esapi.PushSecret
 	for k, v := range ps.Labels {
 		psInfo[k] = v
 	}
+
 	conditionLabels := ctrlmetrics.RefineConditionMetricLabels(psInfo)
+
+	// Add SecretStore reference labels if granular metrics is enabled
+	if len(ps.Spec.SecretStoreRefs) > 0 {
+		conditionLabels = ctrlmetrics.AddStoreRefLabels(
+			conditionLabels,
+			ps.Spec.SecretStoreRefs[0].Name,
+			ps.Spec.SecretStoreRefs[0].Kind,
+			ps.Namespace,
+		)
+	}
 	pushSecretCondition := GetGaugeVec(PushSecretStatusConditionKey)
 
 	switch condition.Type {
