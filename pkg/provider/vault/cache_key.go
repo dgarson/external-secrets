@@ -88,7 +88,7 @@ func ComputeCacheKey(config AcquireClientConfig) (VaultClientCacheKey, error) {
 	}
 
 	// Determine auth method and compute auth config hash
-	authMethod, authHash, err := computeAuthHash(config.VaultProvider.Auth, config.Namespace, config.StoreKind)
+	authMethod, authHash, err := computeAuthHash(config.VaultProvider.Auth, config.CredentialNamespace, config.Metadata.StoreKind)
 	if err != nil {
 		return key, fmt.Errorf("failed to compute auth hash: %w", err)
 	}
@@ -98,10 +98,10 @@ func ComputeCacheKey(config AcquireClientConfig) (VaultClientCacheKey, error) {
 	// Set credential namespace for referent specs
 	// This ensures different K8s namespaces get separate cache entries when
 	// using ClusterSecretStore with namespace-relative credential references
-	if config.StoreKind == esv1.ClusterSecretStoreKind &&
-		config.Namespace != "" &&
+	if config.Metadata.StoreKind == esv1.ClusterSecretStoreKind &&
+		config.CredentialNamespace != "" &&
 		isReferentSpec(config.VaultProvider) {
-		key.CredentialNamespace = config.Namespace
+		key.CredentialNamespace = config.CredentialNamespace
 	}
 
 	// Compute TLS config hash

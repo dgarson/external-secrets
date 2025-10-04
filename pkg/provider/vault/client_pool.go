@@ -18,6 +18,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 
 	vault "github.com/hashicorp/vault/api"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -44,6 +45,18 @@ type ClientPool interface {
 	Close(ctx context.Context) error
 }
 
+// ClientMetadata contains metadata about the store for observability and cache key computation.
+type ClientMetadata struct {
+	// StoreKind is the kind of store (SecretStore or ClusterSecretStore)
+	StoreKind string
+
+	// StoreName is the name of the store (for logging/metrics)
+	StoreName string
+
+	// StoreNamespace is the namespace of the store (empty for ClusterSecretStore)
+	StoreNamespace string
+}
+
 // AcquireClientConfig contains all configuration needed to acquire a Vault client.
 // This includes both the Vault-specific configuration and the Kubernetes context
 // needed for authentication.
@@ -60,17 +73,23 @@ type AcquireClientConfig struct {
 	// CoreV1 is the Kubernetes typed client for TokenRequest API
 	CoreV1 typedcorev1.CoreV1Interface
 
-	// Namespace is the Kubernetes namespace context for credential resolution
-	// For SecretStore: this is the store's namespace
-	// For ClusterSecretStore with referent auth: this is the ExternalSecret's namespace
-	Namespace string
+	// CredentialNamespace is the Kubernetes namespace used to resolve credential references
+	// (secrets, service accounts). For SecretStore, this is the store's namespace.
+	// For ClusterSecretStore with referent auth, this is the ExternalSecret's namespace.
+	CredentialNamespace string
 
-	// StoreKind is the kind of store (SecretStore or ClusterSecretStore)
-	StoreKind string
+	// Metadata contains store metadata for observability and cache key computation
+	Metadata ClientMetadata
+}
 
-	// StoreName is the name of the store (for logging/metrics)
-	StoreName string
-
-	// StoreNamespace is the namespace of the store (empty for ClusterSecretStore)
-	StoreNamespace string
+// Validate checks that all required fields in AcquireClientConfig are set.
+func (c *AcquireClientConfig) Validate() error {
+	if c.VaultConfig == nil {
+		return errors.New("VaultConfig is required")
+	}
+	if c.VaultProvider == nil {
+		return errors.New("VaultProvider is required")
+	}
+	// Kube and CoreV1 are optional - only needed for certain auth methods that reference K8s resources
+	return nil
 }

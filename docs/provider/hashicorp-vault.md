@@ -481,25 +481,7 @@ Benefits:
 
 #### Enabling Client Pooling
 
-Client pooling is disabled by default. Enable it using command-line flags when deploying the External Secrets Operator:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: external-secrets
-spec:
-  template:
-    spec:
-      containers:
-      - name: external-secrets
-        image: ghcr.io/external-secrets/external-secrets:latest
-        args:
-        - --enable-vault-client-pooling                    # Enable client pooling
-        - --enable-vault-token-renewal                     # Enable automatic token renewal
-        - --vault-token-renewal-threshold-percent=50       # Renew at 50% TTL (default)
-        - --vault-token-renewal-check-interval=30m         # Check every 30 minutes (default)
-```
+Client pooling is disabled by default. Enable it using command-line flags when deploying the External Secrets Operator
 
 #### Configuration Flags
 
@@ -606,17 +588,12 @@ avg_over_time(externalsecret_vault_client_pool_size[5m])
 
 #### Important Notes
 
-!!! warning "Static Tokens"
-    Tokens configured via `auth.tokenSecretRef` are considered static and will **not** be renewed automatically, even if token renewal is enabled. Only tokens obtained through authentication methods (AppRole, Kubernetes, JWT, etc.) are renewed.
+* WARNING: Static Tokens configured via `auth.tokenSecretRef` are considered static and will **not** be renewed automatically, even if token renewal is enabled. Only tokens obtained through authentication methods (AppRole, Kubernetes, JWT, etc.) are renewed.
 
-!!! note "Backward Compatibility"
-    Client pooling is disabled by default to ensure backward compatibility. When disabled, the operator behaves exactly as before, creating a new client for each reconciliation.
-
-!!! tip "Performance"
-    For best performance in high-volume environments:
-    - Enable both `--enable-vault-client-pooling` and `--enable-vault-token-renewal`
-    - Set renewal threshold to 50-70% to ensure tokens are renewed well before expiration
-    - Monitor cache hit rate metrics to verify pooling is effective
+* SUGGESTION: For best performance in high-volume environments:
+  - Enable both `--enable-vault-client-pooling` and `--enable-vault-token-renewal`
+  - Set renewal threshold to 50-70% to ensure tokens are renewed well before expiration
+  - Monitor cache hit rate metrics to verify pooling is effective
 
 ### Vault Enterprise
 

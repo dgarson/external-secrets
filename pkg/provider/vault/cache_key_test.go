@@ -51,8 +51,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -68,8 +70,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: true,
 			reason:      "identical configurations should produce identical cache keys",
@@ -87,8 +91,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -101,8 +107,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different Vault servers should have different cache keys",
@@ -120,8 +128,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -138,8 +148,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different auth methods should have different cache keys",
@@ -158,8 +170,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -173,8 +187,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different Vault namespaces should have different cache keys",
@@ -193,8 +209,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -208,8 +226,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different auth namespaces should have different cache keys",
@@ -231,8 +251,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "namespace-a",
+				CredentialNamespace: "namespace-a",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.ClusterSecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -249,8 +271,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "namespace-b",
+				CredentialNamespace: "namespace-b",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.ClusterSecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "ClusterSecretStore with referent spec should use different cache keys for different k8s namespaces",
@@ -272,8 +296,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "namespace-a",
+				CredentialNamespace: "namespace-a",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.ClusterSecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -290,8 +316,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "namespace-b",
+				CredentialNamespace: "namespace-b",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.ClusterSecretStoreKind,
+			},
 			},
 			shouldMatch: true,
 			reason:      "ClusterSecretStore with explicit namespace should share cache across k8s namespaces",
@@ -309,8 +337,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -323,8 +353,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different Kubernetes roles should have different cache keys",
@@ -352,8 +384,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -376,8 +410,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different TLS configurations should have different cache keys",
@@ -397,8 +433,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -413,8 +451,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different Vault secrets namespaces (provider.Namespace) should have different cache keys even with same auth namespace",
@@ -435,8 +475,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -452,8 +494,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: false,
 			reason:      "different custom headers should have different cache keys",
@@ -476,8 +520,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			config2: AcquireClientConfig{
 				VaultConfig: &vault.Config{},
@@ -495,8 +541,10 @@ func TestComputeCacheKey(t *testing.T) {
 						},
 					},
 				},
-				Namespace: "default",
+				CredentialNamespace: "default",
+			Metadata: ClientMetadata{
 				StoreKind: esv1.SecretStoreKind,
+			},
 			},
 			shouldMatch: true,
 			reason:      "auth-related headers (Authorization, X-Vault-Token, X-Vault-Namespace) should be excluded from cache key hash",
@@ -674,8 +722,10 @@ func TestCacheKeyDeterministic(t *testing.T) {
 				},
 			},
 		},
-		Namespace: "default",
-		StoreKind: esv1.SecretStoreKind,
+		CredentialNamespace: "default",
+			Metadata: ClientMetadata{
+				StoreKind: esv1.SecretStoreKind,
+			},
 	}
 
 	// Compute the cache key multiple times

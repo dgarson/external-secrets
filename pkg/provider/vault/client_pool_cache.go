@@ -19,11 +19,11 @@ package vault
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/cenkalti/backoff/v5"
+	"golang.org/x/sync/singleflight"
 	lru "github.com/hashicorp/golang-lru/v2"
 	vault "github.com/hashicorp/vault/api"
 
@@ -37,15 +37,13 @@ import (
 type CachingClientPool struct {
 	mu             sync.RWMutex
 	cache          *lru.Cache[string, *ManagedClient]
+	createGroup    singleflight.Group // Deduplicates concurrent createClient calls
 	newVaultClient func(config *vault.Config) (util.Client, error)
 
 	// Configuration for ManagedClient creation
 	enableRenewal           bool
 	renewalThresholdPercent int
 	renewalCheckInterval    time.Duration
-	reauthBackoffBase       time.Duration
-	reauthBackoffMax        time.Duration
-	maxReauthAttempts       uint
 	tokenOperationTimeout   time.Duration
 
 	// Client index for reverse lookup (client -> ManagedClient)
@@ -66,10 +64,6 @@ type CachingClientPoolConfig struct {
 
 	TokenOperationTimeout time.Duration
 	MaxCacheSize          int
-
-	ReauthBackoffBase time.Duration
-	ReauthBackoffMax  time.Duration
-	MaxReauthAttempts uint
 
 	// Optional callback invoked when a client is evicted from the cache.
 	// This is called with the Vault server address of the evicted client.
@@ -94,24 +88,12 @@ func NewCachingClientPool(config CachingClientPoolConfig) *CachingClientPool {
 	if config.TokenOperationTimeout == 0 {
 		config.TokenOperationTimeout = defaultTokenOperationTimeout
 	}
-	if config.ReauthBackoffBase == 0 {
-		config.ReauthBackoffBase = 1 * time.Second
-	}
-	if config.ReauthBackoffMax == 0 {
-		config.ReauthBackoffMax = 5 * time.Minute
-	}
-	if config.MaxReauthAttempts == 0 {
-		config.MaxReauthAttempts = 3
-	}
 
 	pool := &CachingClientPool{
 		newVaultClient:          config.NewVaultClient,
 		enableRenewal:           config.EnableRenewal,
 		renewalThresholdPercent: config.RenewalThresholdPercent,
 		renewalCheckInterval:    config.RenewalCheckInterval,
-		reauthBackoffBase:       config.ReauthBackoffBase,
-		reauthBackoffMax:        config.ReauthBackoffMax,
-		maxReauthAttempts:       config.MaxReauthAttempts,
 		tokenOperationTimeout:   config.TokenOperationTimeout,
 		onClientEvicted:         config.OnClientEvicted,
 		clientIndex:             make(map[util.Client]*ManagedClient),
@@ -128,72 +110,33 @@ func NewCachingClientPool(config CachingClientPoolConfig) *CachingClientPool {
 	return pool
 }
 
-// isPermanentAuthError checks if an error is a permanent authentication failure
-// that should not be retried (e.g., permission denied, invalid credentials).
-func isPermanentAuthError(err error) bool {
-	if err == nil {
+// hasDynamicTLS returns true if the provider uses TLS certificates from Kubernetes secrets.
+// TLS configuration is set when creating the HTTP client and cannot be updated via re-authentication
+// (unlike auth tokens). Therefore, clients with dynamic TLS should not be cached to ensure
+// certificate rotations are picked up immediately.
+func hasDynamicTLS(provider *esv1.VaultProvider) bool {
+	if provider == nil {
 		return false
 	}
-	errStr := strings.ToLower(err.Error())
-	// Check for permanent error indicators
-	permanentPatterns := []string{
-		"permission denied",
-		"invalid credentials",
-		"unauthorized",
-		"authentication failed",
-		"invalid token",
-		"forbidden",
-		"access denied",
-	}
-	for _, pattern := range permanentPatterns {
-		if strings.Contains(errStr, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// reauthenticateWithBackoff attempts to re-authenticate a ManagedClient with exponential backoff.
-// It uses the cenkalti/backoff library to handle retry logic and respects MaxReauthAttempts.
-// Returns a permanent error (via backoff.Permanent) for auth failures that should not be retried.
-func (p *CachingClientPool) reauthenticateWithBackoff(ctx context.Context, managed *ManagedClient, config AcquireClientConfig, keyStr string) error {
-	// Create exponential backoff strategy
-	b := backoff.NewExponentialBackOff()
-	b.InitialInterval = p.reauthBackoffBase
-	b.MaxInterval = p.reauthBackoffMax
-
-	// Retry function - returns struct{} as a placeholder since we only care about errors
-	operation := func() (struct{}, error) {
-		logger.V(1).Info("attempting re-authentication", "key", keyStr)
-		err := managed.Reauthenticate(ctx, config)
-		if err != nil {
-			// Check if this is a permanent error
-			if isPermanentAuthError(err) {
-				logger.Error(err, "permanent authentication error, stopping retries", "key", keyStr)
-				return struct{}{}, backoff.Permanent(err)
-			}
-			logger.V(1).Info("re-authentication attempt failed, will retry", "key", keyStr, "err", err)
-			return struct{}{}, err
-		}
-		logger.V(1).Info("re-authentication succeeded", "key", keyStr)
-		return struct{}{}, nil
-	}
-
-	// Execute with backoff, respecting max attempts and context
-	_, err := backoff.Retry(
-		ctx,
-		operation,
-		backoff.WithBackOff(b),
-		backoff.WithMaxTries(uint(p.maxReauthAttempts)),
-	)
-	if err != nil {
-		return fmt.Errorf("re-authentication failed after retries: %w", err)
-	}
-	return nil
+	// TLS certs/keys from K8s secrets can be rotated - these clients should not be cached
+	return provider.ClientTLS.CertSecretRef != nil || provider.ClientTLS.KeySecretRef != nil
 }
 
 // AcquireClient returns a cached ManagedClient or creates a new one.
 func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireClientConfig) (util.Client, error) {
+	// Validate config
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	// Don't cache clients with TLS certificates from secrets
+	// TLS config is set at HTTP client creation and cannot be updated via reauth (unlike tokens)
+	// This ensures certificate rotations are picked up immediately
+	if hasDynamicTLS(config.VaultProvider) {
+		logger.V(1).Info("creating non-cached vault client due to dynamic TLS configuration")
+		return createClient(&config, p.newVaultClient)
+	}
+
 	// Compute cache key
 	cacheKey, err := ComputeCacheKey(config)
 	if err != nil {
@@ -201,94 +144,84 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 	}
 	keyStr := cacheKey.String()
 
-	// Check if we have a cached client
+	// Fast path: check cache with read lock
 	p.mu.RLock()
 	managed, exists := p.cache.Get(keyStr)
 	p.mu.RUnlock()
 
 	if exists {
-		// Validate the cached client's token via ManagedClient
-		valid, err := managed.ValidateToken(ctx)
-		if err == nil && valid {
-			// Token is still valid, use cached client
-			logger.V(1).Info("reusing cached vault client", "key", keyStr)
-			managed.Acquire()
-			return managed.Client(), nil
+		// Get a valid client (will reauth if needed using its own singleflight)
+		client, err := managed.GetValidClient(ctx, config)
+		if err != nil {
+			// Re-authentication failed - return error instead of creating new client
+			// (creating new client with same credentials would fail the same way)
+			return nil, fmt.Errorf("cached client reauth failed: %w", err)
 		}
 
-		// Token is invalid, check if we should attempt re-auth (respects backoff)
-		shouldAttempt, backoffRemaining := managed.ShouldAttemptReauth()
-		if !shouldAttempt {
-			// Still in backoff period, remove from cache and create new client
-			logger.V(1).Info("skipping re-auth due to backoff", "key", keyStr, "backoff_remaining", backoffRemaining)
-			p.mu.Lock()
-			p.cache.Remove(keyStr)
-			p.mu.Unlock()
-			// Fall through to create new client
-		} else {
-			// Try to re-authenticate using backoff logic
-			logger.V(1).Info("cached vault client token invalid, re-authenticating with fresh credentials", "key", keyStr)
-			reauthErr := p.reauthenticateWithBackoff(ctx, managed, config, keyStr)
-			if reauthErr != nil {
-				// Re-authentication failed after all retries, remove from cache and create new
-				logger.Error(reauthErr, "failed to re-authenticate cached client after retries", "key", keyStr)
-				p.mu.Lock()
-				p.cache.Remove(keyStr)  // This triggers handleEvictedClient which stops renewal
-				p.mu.Unlock()
-				// Fall through to create new client
-			} else {
-				// Re-authentication succeeded
-				logger.V(1).Info("re-authentication succeeded", "key", keyStr)
-				managed.Acquire()
-				return managed.Client(), nil
-			}
-		}
-	}
-
-	// Use write lock to prevent concurrent creation
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Double-check: another goroutine may have created it
-	if managed, exists := p.cache.Get(keyStr); exists {
+		// Successfully got valid client (either was valid or successfully reauthed)
+		logger.V(1).Info("using cached vault client", "key", keyStr)
 		managed.Acquire()
-		return managed.Client(), nil
+		return client, nil
 	}
 
-	// Create new Vault client
-	vaultClient, err := createClient(&config, p.newVaultClient)
+	// Slow path: use singleflight to ensure only ONE goroutine creates the client.
+	// Multiple goroutines requesting the same uncached key will wait here and all
+	// receive the same result when the first goroutine completes.
+	result, err, _ := p.createGroup.Do(keyStr, func() (interface{}, error) {
+		// Double-check cache inside singleflight (another goroutine may have won)
+		p.mu.RLock()
+		if existing, ok := p.cache.Get(keyStr); ok {
+			p.mu.RUnlock()
+			return existing, nil
+		}
+		p.mu.RUnlock()
+
+		// Actually create new client (expensive I/O operation)
+		vaultClient, err := createClient(&config, p.newVaultClient)
+		if err != nil {
+			return nil, err
+		}
+
+		// Create ManagedClient wrapper
+		managed := NewManagedClient(ManagedClientConfig{
+			Client:                  vaultClient,
+			Config:                  config,
+			CacheKey:                keyStr,
+			Deps: ManagedClientDeps{
+				onEvicted: func(key string) {
+					// ManagedClient is requesting eviction due to renewal failures
+					p.mu.Lock()
+					p.cache.Remove(key)
+					p.mu.Unlock()
+				},
+			},
+			EnableRenewal:           p.enableRenewal,
+			RenewalThresholdPercent: p.renewalThresholdPercent,
+			RenewalCheckInterval:    p.renewalCheckInterval,
+			TokenOperationTimeout:   p.tokenOperationTimeout,
+		})
+
+		// Calculate initial renewal time after successful authentication
+		if p.enableRenewal {
+			reauthCtx, cancel := context.WithTimeout(ctx, p.tokenOperationTimeout)
+			managed.calculateAndSetNextRenewal(reauthCtx)
+			cancel()
+		}
+
+		// Add to cache and register for reverse lookup under write lock
+		p.mu.Lock()
+		p.cache.Add(keyStr, managed)
+		p.registerClient(managed)
+		p.mu.Unlock()
+
+		return managed, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	// Create ManagedClient wrapper with callbacks
-	managed = NewManagedClient(ManagedClientConfig{
-		Client:  vaultClient,
-		Config:  config,
-		CacheKey: cacheKey,
-		Callbacks: ManagedClientCallbacks{
-			OnEvictionNeeded: func(key VaultClientCacheKey) {
-				// ManagedClient is requesting eviction due to renewal failures
-				p.mu.Lock()
-				p.cache.Remove(key.String())
-				p.mu.Unlock()
-			},
-		},
-		EnableRenewal:           p.enableRenewal,
-		RenewalThresholdPercent: p.renewalThresholdPercent,
-		RenewalCheckInterval:    p.renewalCheckInterval,
-		ReauthBackoffBase:       p.reauthBackoffBase,
-		ReauthBackoffMax:        p.reauthBackoffMax,
-		TokenOperationTimeout:   p.tokenOperationTimeout,
-	})
-
-	// Register in client index for reverse lookup
-	p.registerClient(managed)
-
-	// Add to cache
-	p.cache.Add(keyStr, managed)
-
-	// Acquire and return - ManagedClient has already started its renewal goroutine
+	managed = result.(*ManagedClient)
 	managed.Acquire()
 	return managed.Client(), nil
 }
@@ -337,10 +270,11 @@ func (p *CachingClientPool) handleEvictedClient(key string, managed *ManagedClie
 	}
 
 	// Mark as evicted so Release() knows to finalize when refcount reaches 0
-	managed.markEvicted()
+	atomic.StoreInt32(&managed.evicted, 1)
 
 	// If no active users, close immediately
-	if managed.activeCount() == 0 {
+	activeUsers := atomic.LoadInt32(&managed.activeUsers)
+	if activeUsers == 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), p.tokenOperationTimeout)
 		defer cancel()
 
@@ -356,7 +290,7 @@ func (p *CachingClientPool) handleEvictedClient(key string, managed *ManagedClie
 		}
 	}
 
-	logger.V(1).Info("evicted client from cache", "key", key, "active_users", managed.activeCount())
+	logger.V(1).Info("evicted client from cache", "key", key, "active_users", activeUsers)
 }
 
 
@@ -373,10 +307,10 @@ func (p *CachingClientPool) finalizeAllClients(ctx context.Context) {
 		if managed == nil {
 			continue
 		}
-		managed.markEvicted()
+		atomic.StoreInt32(&managed.evicted, 1)
 
 		if err := managed.Close(ctx); err != nil {
-			logger.Error(err, "failed to close client during shutdown", "key", managed.CacheKey().String())
+			logger.Error(err, "failed to close client during shutdown", "key", managed.CacheKey())
 		}
 
 		p.unregisterClient(managed)
@@ -435,8 +369,8 @@ func createClient(config *AcquireClientConfig, newVaultClient func(*vault.Config
 		kube:      config.Kube,
 		corev1:    config.CoreV1,
 		store:     config.VaultProvider,
-		namespace: config.Namespace,
-		storeKind: config.StoreKind,
+		namespace: config.CredentialNamespace,
+		storeKind: config.Metadata.StoreKind,
 		client:    vaultClient,
 		auth:      vaultClient.Auth(),
 		logical:   vaultClient.Logical(),
@@ -444,8 +378,8 @@ func createClient(config *AcquireClientConfig, newVaultClient func(*vault.Config
 		log:       logger,
 	}
 
-	skipAuth := config.StoreKind == esv1.ClusterSecretStoreKind &&
-		config.Namespace == "" &&
+	skipAuth := config.Metadata.StoreKind == esv1.ClusterSecretStoreKind &&
+		config.CredentialNamespace == "" &&
 		isReferentSpec(config.VaultProvider)
 
 	if !skipAuth {

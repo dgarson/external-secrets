@@ -18,6 +18,7 @@ package vault
 
 import (
 	"context"
+	"fmt"
 
 	vault "github.com/hashicorp/vault/api"
 
@@ -54,6 +55,11 @@ func NewNoOpClientPool(newVaultClient func(config *vault.Config) (util.Client, e
 // AcquireClient creates a new Vault client and authenticates it.
 // This matches the current behavior where each operation gets a fresh client.
 func (p *NoOpClientPool) AcquireClient(ctx context.Context, config AcquireClientConfig) (util.Client, error) {
+	// Validate config
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
 	// Create new Vault client
 	vaultClient, err := p.newVaultClient(config.VaultConfig)
 	if err != nil {
@@ -83,8 +89,8 @@ func (p *NoOpClientPool) AcquireClient(ctx context.Context, config AcquireClient
 		kube:      config.Kube,
 		corev1:    config.CoreV1,
 		store:     config.VaultProvider,
-		namespace: config.Namespace,
-		storeKind: config.StoreKind,
+		namespace: config.CredentialNamespace,
+		storeKind: config.Metadata.StoreKind,
 		client:    vaultClient,
 		auth:      vaultClient.Auth(),
 		logical:   vaultClient.Logical(),
@@ -93,8 +99,8 @@ func (p *NoOpClientPool) AcquireClient(ctx context.Context, config AcquireClient
 	}
 
 	// allow SecretStore controller validation to pass when using referent namespace
-	skipAuth := config.StoreKind == esv1.ClusterSecretStoreKind &&
-		config.Namespace == "" &&
+	skipAuth := config.Metadata.StoreKind == esv1.ClusterSecretStoreKind &&
+		config.CredentialNamespace == "" &&
 		isReferentSpec(config.VaultProvider)
 	if !skipAuth {
 		if err := c.setAuth(ctx, config.VaultConfig); err != nil {
