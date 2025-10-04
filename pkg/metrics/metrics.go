@@ -24,12 +24,14 @@ import (
 )
 
 const (
-	ExternalSecretSubsystem      = "externalsecret"
-	providerAPICalls             = "provider_api_calls_count"
-	vaultClientPoolOperations    = "vault_client_pool_operations_total"
-	vaultClientPoolSize          = "vault_client_pool_size"
-	vaultClientTokenRenewals     = "vault_client_token_renewals_total"
-	vaultClientTokenRenewalTimer = "vault_client_token_renewal_duration_seconds"
+	ExternalSecretSubsystem           = "externalsecret"
+	providerAPICalls                  = "provider_api_calls_count"
+	vaultClientPoolOperations         = "vault_client_pool_operations_total"
+	vaultClientPoolSize               = "vault_client_pool_size"
+	vaultClientTokenRenewals          = "vault_client_token_renewals_total"
+	vaultClientTokenRenewalTimer      = "vault_client_token_renewal_duration_seconds"
+	vaultClientReauthBackoffSeconds   = "vault_client_reauth_backoff_seconds"
+	vaultClientReauthAttempts         = "vault_client_reauth_attempts"
 )
 
 var (
@@ -63,6 +65,18 @@ var (
 		Help:      "Duration of Vault token renewal operations in seconds",
 		Buckets:   prometheus.DefBuckets,
 	}, []string{"address"})
+
+	vaultReauthBackoffGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: ExternalSecretSubsystem,
+		Name:      vaultClientReauthBackoffSeconds,
+		Help:      "Current re-authentication backoff duration in seconds for Vault clients",
+	}, []string{"address"})
+
+	vaultReauthAttemptsGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: ExternalSecretSubsystem,
+		Name:      vaultClientReauthAttempts,
+		Help:      "Current consecutive re-authentication attempt count for Vault clients",
+	}, []string{"address"})
 )
 
 func ObserveAPICall(provider, call string, err error) {
@@ -90,6 +104,16 @@ func ObserveVaultTokenRenewalDuration(address string, seconds float64) {
 	vaultTokenRenewalDuration.WithLabelValues(address).Observe(seconds)
 }
 
+// SetVaultReauthBackoff sets the current re-authentication backoff duration.
+func SetVaultReauthBackoff(address string, seconds float64) {
+	vaultReauthBackoffGauge.WithLabelValues(address).Set(seconds)
+}
+
+// SetVaultReauthAttempts sets the current consecutive re-authentication attempt count.
+func SetVaultReauthAttempts(address string, attempts int32) {
+	vaultReauthAttemptsGauge.WithLabelValues(address).Set(float64(attempts))
+}
+
 func deriveStatus(err error) string {
 	if err != nil {
 		return constants.StatusError
@@ -104,5 +128,7 @@ func init() {
 		vaultClientPoolGauge,
 		vaultTokenRenewals,
 		vaultTokenRenewalDuration,
+		vaultReauthBackoffGauge,
+		vaultReauthAttemptsGauge,
 	)
 }

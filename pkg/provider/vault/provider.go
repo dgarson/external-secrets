@@ -324,18 +324,43 @@ func isReferentSpec(prov *esv1.VaultProvider) bool {
 	return false
 }
 
-func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, renewalInterval time.Duration) {
+func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, renewalInterval, reauthBackoffBase, reauthBackoffMax, apiTimeout time.Duration, maxReauthAttempts uint, cacheSize int) {
 	if enablePooling {
-		logger.Info("initializing vault client pool with caching",
+		logger.Info("initializing vault client pool with caching and metrics",
 			"enableRenewal", enableRenewal,
 			"renewalThreshold", renewalThreshold,
-			"renewalInterval", renewalInterval)
-		clientPool = NewCachingClientPool(CachingClientPoolConfig{
+			"renewalInterval", renewalInterval,
+			"reauthBackoffBase", reauthBackoffBase,
+			"reauthBackoffMax", reauthBackoffMax,
+			"maxReauthAttempts", maxReauthAttempts,
+			"apiTimeout", apiTimeout,
+			"cacheSize", cacheSize)
+
+		// Declare variable to hold metrics pool for callback closure
+		var metricsPool *MetricsClientPool
+
+		// Layer 2: Create pure caching pool with eviction callback
+		cachingPool := NewCachingClientPool(CachingClientPoolConfig{
 			NewVaultClient:          NewVaultClient,
 			EnableRenewal:           enableRenewal,
 			RenewalThresholdPercent: renewalThreshold,
 			RenewalCheckInterval:    renewalInterval,
+			ReauthBackoffBase:       reauthBackoffBase,
+			ReauthBackoffMax:        reauthBackoffMax,
+			MaxReauthAttempts:       maxReauthAttempts,
+			TokenOperationTimeout:   apiTimeout,
+			MaxCacheSize:            cacheSize,
+			// Callback to notify metrics layer when clients are evicted/finalized
+			OnClientEvicted: func(address string) {
+				if metricsPool != nil {
+					metricsPool.TrackClientRemoved(address)
+				}
+			},
 		})
+
+		// Layer 3: Wrap with metrics decorator (observability concerns)
+		metricsPool = NewMetricsClientPool(cachingPool)
+		clientPool = metricsPool
 	} else {
 		logger.Info("initializing vault client pool without caching (legacy mode)")
 		clientPool = NewNoOpClientPool(NewVaultClient)
@@ -352,6 +377,11 @@ func init() {
 		enableTokenRenewal             bool
 		tokenRenewalThresholdPercent   int
 		tokenRenewalCheckIntervalStr   string
+		reauthBackoffBaseStr           string
+		reauthBackoffMaxStr            string
+		maxReauthAttempts              uint
+		apiTimeoutStr                  string
+		clientPoolCacheSize            int
 	)
 
 	fs := pflag.NewFlagSet("vault", pflag.ExitOnError)
@@ -371,6 +401,16 @@ func init() {
 		"Percentage of token TTL remaining before renewal (1-100). When set, overrides --vault-token-renewal-check-interval with a dynamic interval. Only used if --enable-vault-token-renewal is set.")
 	fs.StringVar(&tokenRenewalCheckIntervalStr, "vault-token-renewal-check-interval", "30m",
 		"How often to check if tokens need renewal (e.g., '30m', '1h'). Ignored if --vault-token-renewal-threshold-percent is set. Only used if --enable-vault-token-renewal is set.")
+	fs.StringVar(&reauthBackoffBaseStr, "vault-reauth-backoff-base-duration", "1s",
+		"Base duration for exponential backoff on re-authentication failures (e.g., '1s', '2s'). Backoff doubles with each consecutive failure. Only used if --enable-vault-client-pooling is set.")
+	fs.StringVar(&reauthBackoffMaxStr, "vault-reauth-backoff-max-duration", "5m",
+		"Maximum backoff duration for re-authentication attempts (e.g., '5m', '10m'). Caps the exponential backoff. Only used if --enable-vault-client-pooling is set.")
+	fs.UintVar(&maxReauthAttempts, "vault-max-reauth-attempts", 3,
+		"Maximum number of re-authentication attempts before giving up (0 means unlimited). Only used if --enable-vault-client-pooling is set.")
+	fs.StringVar(&apiTimeoutStr, "vault-api-timeout", "30s",
+		"Timeout for Vault API operations including token operations (lookup, renewal, revocation). Only used if --enable-vault-client-pooling is set.")
+	fs.IntVar(&clientPoolCacheSize, "vault-client-pool-cache-size", 1000,
+		"Maximum number of Vault clients to cache in the pool. LRU eviction occurs when this limit is reached. Only used if --enable-vault-client-pooling is set.")
 
 	feature.Register(feature.Feature{
 		Flags: fs,
@@ -390,8 +430,27 @@ func init() {
 				renewalInterval = 30 * time.Minute
 			}
 
+			// Parse re-auth backoff durations
+			reauthBackoffBase, err := time.ParseDuration(reauthBackoffBaseStr)
+			if err != nil {
+				logger.Error(err, "invalid vault-reauth-backoff-base-duration, using default 1s")
+				reauthBackoffBase = 1 * time.Second
+			}
+			reauthBackoffMax, err := time.ParseDuration(reauthBackoffMaxStr)
+			if err != nil {
+				logger.Error(err, "invalid vault-reauth-backoff-max-duration, using default 5m")
+				reauthBackoffMax = 5 * time.Minute
+			}
+
+			// Parse API timeout
+			apiTimeout, err := time.ParseDuration(apiTimeoutStr)
+			if err != nil {
+				logger.Error(err, "invalid vault-api-timeout, using default 30s")
+				apiTimeout = 30 * time.Second
+			}
+
 			// Initialize the client pool (no longer using legacy cache)
-			initClientPool(enableClientPool, enableTokenRenewal, tokenRenewalThresholdPercent, renewalInterval)
+			initClientPool(enableClientPool, enableTokenRenewal, tokenRenewalThresholdPercent, renewalInterval, reauthBackoffBase, reauthBackoffMax, apiTimeout, maxReauthAttempts, clientPoolCacheSize)
 		},
 	})
 

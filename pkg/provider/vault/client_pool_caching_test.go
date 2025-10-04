@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -586,13 +587,25 @@ func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
 	address := "https://vault-metrics.example.com"
 	metrics.SetVaultClientPoolSize(address, 0)
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	// Use same pattern as provider.go factory to wire callback
+	var metricsPool *MetricsClientPool
+
+	cachingPool := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
 			cl.MockGetAddress = func() string { return address }
 		}),
 		EnableRenewal: false,
 		MaxCacheSize:  1,
+		OnClientEvicted: func(address string) {
+			if metricsPool != nil {
+				metricsPool.TrackClientRemoved(address)
+			}
+		},
 	})
+
+	// Wrap with MetricsClientPool to emit metrics
+	metricsPool = NewMetricsClientPool(cachingPool)
+	pool := metricsPool
 	ctx := context.Background()
 
 	config1 := createTestAcquireConfig(address, "metrics-ns1")
@@ -601,10 +614,15 @@ func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
 	require.NotNil(t, client1)
 	assert.Equal(t, 1.0, getPoolGaugeValue(t, address), "gauge should reflect single client")
 
+	// Release client1 so it can be finalized when evicted
+	pool.ReleaseClient(ctx, client1)
+
 	config2 := createTestAcquireConfig(address, "metrics-ns2")
 	client2, err := pool.AcquireClient(ctx, config2)
 	require.NoError(t, err)
 	require.NotNil(t, client2)
+	// After acquiring client2, client1 is evicted from cache (MaxCacheSize=1)
+	// Since client1 was released, it gets finalized and callback fires
 	assert.Equal(t, 1.0, getPoolGaugeValue(t, address), "gauge should stay at size 1 after eviction")
 
 	require.NoError(t, pool.Close(ctx))
@@ -645,3 +663,164 @@ func getPoolGaugeValue(t *testing.T, address string) float64 {
 
 	return 0
 }
+
+func TestCachingClientPool_ReauthBackoff(t *testing.T) {
+	reauthAttempts := atomic.Int32{}
+	reauthAttempts.Store(0)
+
+	failingVaultClient := fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
+		// Make auth succeed for client creation, fail for re-auth
+		cl.MockAuth = fake.Auth{
+			LoginFn: func(ctx context.Context, authMethod vault.AuthMethod) (*vault.Secret, error) {
+				attempt := reauthAttempts.Add(1)
+				// Allow client creation to succeed (attempts 1, 2, 3, 4...)
+				// but mark that we attempted re-auth
+				return &vault.Secret{Auth: &vault.SecretAuth{ClientToken: fmt.Sprintf("token-%d", attempt)}}, nil
+			},
+		}
+		// Make token lookup return invalid token to trigger re-auth
+		cl.MockAuthToken = fake.Token{
+			LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
+				// Return invalid token to trigger re-auth on cache hits
+				return nil, errors.New("token invalid")
+			},
+			RenewSelfWithContextFn: func(ctx context.Context, increment int) (*vault.Secret, error) {
+				return nil, nil
+			},
+		}
+	})
+
+	config := CachingClientPoolConfig{
+		NewVaultClient:    failingVaultClient,
+		EnableRenewal:     false,
+		ReauthBackoffBase: 100 * time.Millisecond,
+		ReauthBackoffMax:  1 * time.Second,
+		MaxReauthAttempts: 1, // Single re-auth attempt for testing backoff
+	}
+	pool := NewCachingClientPool(config)
+	defer pool.Close(context.Background())
+
+	ctx := context.Background()
+	acquireConfig := createAppRoleAcquireConfig("http://vault.example.com", "default")
+
+	// First acquisition should succeed (creates new client)
+	client1, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	require.NotNil(t, client1)
+	assert.Equal(t, int32(1), reauthAttempts.Load(), "Should have attempted auth once for new client")
+
+	// Second acquisition with invalid token should attempt re-auth and succeed
+	time.Sleep(10 * time.Millisecond) // Small delay to ensure different timestamp
+	client2, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), reauthAttempts.Load(), "Should have attempted re-auth once")
+
+	// Third acquisition should be in backoff (100ms base * 2^1 = 200ms)
+	// Since we're in backoff, we skip re-auth and create a new client instead
+	time.Sleep(10 * time.Millisecond)
+	start := time.Now()
+	client3, err := pool.AcquireClient(ctx, acquireConfig)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.NotNil(t, client3)
+	// Should have created new client instead of re-authing (attempt 3)
+	assert.Equal(t, int32(3), reauthAttempts.Load(), "Should have created new client (skipped re-auth due to backoff)")
+	assert.Less(t, elapsed, 50*time.Millisecond, "Should not have waited for backoff")
+
+	// Wait for backoff to expire and try again
+	time.Sleep(250 * time.Millisecond) // Wait for backoff (100ms * 2^1 = 200ms)
+	client4, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	// Should have attempted re-auth again after backoff expired (attempt 4)
+	assert.Equal(t, int32(4), reauthAttempts.Load(), "Should have attempted re-auth after backoff expired")
+
+	pool.ReleaseClient(ctx, client1)
+	pool.ReleaseClient(ctx, client2)
+	pool.ReleaseClient(ctx, client3)
+	pool.ReleaseClient(ctx, client4)
+}
+
+func TestCachingClientPool_ReauthBackoffReset(t *testing.T) {
+	reauthAttempts := atomic.Int32{}
+	reauthAttempts.Store(0)
+	shouldFail := atomic.Bool{}
+	shouldFail.Store(false) // Start with success for initial client creation
+
+	vaultClientFactory := fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
+		cl.MockAuth = fake.Auth{
+			LoginFn: func(ctx context.Context, authMethod vault.AuthMethod) (*vault.Secret, error) {
+				reauthAttempts.Add(1)
+				if shouldFail.Load() {
+					return nil, errors.New("auth failed")
+				}
+				return &vault.Secret{Auth: &vault.SecretAuth{ClientToken: "new-token"}}, nil
+			},
+		}
+		// Make token lookup return invalid token to trigger re-auth
+		cl.MockAuthToken = fake.Token{
+			LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
+				// Return invalid to trigger re-auth on cache hits
+				return nil, errors.New("token invalid")
+			},
+			RenewSelfWithContextFn: func(ctx context.Context, increment int) (*vault.Secret, error) {
+				return nil, nil
+			},
+		}
+	})
+
+	config := CachingClientPoolConfig{
+		NewVaultClient:    vaultClientFactory,
+		EnableRenewal:     false,
+		ReauthBackoffBase: 100 * time.Millisecond,
+		ReauthBackoffMax:  1 * time.Second,
+		MaxReauthAttempts: 1, // Single re-auth attempt for testing backoff
+	}
+	pool := NewCachingClientPool(config)
+	defer pool.Close(context.Background())
+
+	ctx := context.Background()
+	acquireConfig := createAppRoleAcquireConfig("http://vault.example.com", "default")
+
+	// Create client (first auth succeeds)
+	client1, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), reauthAttempts.Load())
+
+	// Now make re-auth attempts fail to build up backoff
+	shouldFail.Store(true)
+
+	time.Sleep(10 * time.Millisecond)
+	client2, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), reauthAttempts.Load(), "First re-auth attempt failed")
+
+	// Now make auth succeed
+	shouldFail.Store(false)
+
+	// Wait for backoff to expire
+	time.Sleep(250 * time.Millisecond)
+
+	// This should succeed with re-auth and reset the backoff counter
+	client3, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), reauthAttempts.Load(), "Should have re-authed successfully")
+
+	// Make auth fail again
+	shouldFail.Store(true)
+
+	// Next attempt should start backoff from the beginning (100ms, not 400ms)
+	time.Sleep(10 * time.Millisecond)
+	beforeAttempts := reauthAttempts.Load()
+	client4, err := pool.AcquireClient(ctx, acquireConfig)
+	require.NoError(t, err)
+	assert.Equal(t, beforeAttempts+1, reauthAttempts.Load(), "Should have attempted re-auth (backoff was reset)")
+
+	pool.ReleaseClient(ctx, client1)
+	pool.ReleaseClient(ctx, client2)
+	pool.ReleaseClient(ctx, client3)
+	pool.ReleaseClient(ctx, client4)
+}
+
+// NOTE: TestCachingClientPool_ReauthBackoffExponential has been removed.
+// The exponential backoff calculation logic is now tested in managed_client_test.go
+// as it's part of ManagedClient, not CachingClientPool.
