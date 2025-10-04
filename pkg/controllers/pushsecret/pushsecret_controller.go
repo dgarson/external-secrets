@@ -340,13 +340,13 @@ func (r *Reconciler) DeleteSecretFromProviders(ctx context.Context, ps *esapi.Pu
 			Name: strings.Split(storeName, "/")[1],
 			Kind: strings.Split(storeName, "/")[0],
 		}
-		client, recorder, err := mgr.Get(ctx, storeRef, ps.Namespace, nil)
+		client, observe, err := mgr.Get(ctx, storeRef, ps.Namespace, nil)
 		if err != nil {
 			return out, fmt.Errorf("could not get secrets client for store %v: %w", storeName, err)
 		}
 		newData, ok := newMap[storeName]
 		if !ok {
-			err = r.DeleteAllSecretsFromStore(ctx, client, recorder, oldData)
+			err = r.DeleteAllSecretsFromStore(ctx, client, observe, oldData)
 			if err != nil {
 				return out, err
 			}
@@ -356,7 +356,7 @@ func (r *Reconciler) DeleteSecretFromProviders(ctx context.Context, ps *esapi.Pu
 		for oldEntry, oldRef := range oldData {
 			_, ok := newData[oldEntry]
 			if !ok {
-				err = r.DeleteSecretFromStore(ctx, client, recorder, oldRef)
+				err = r.DeleteSecretFromStore(ctx, client, observe, oldRef)
 				if err != nil {
 					return out, err
 				}
@@ -367,9 +367,9 @@ func (r *Reconciler) DeleteSecretFromProviders(ctx context.Context, ps *esapi.Pu
 	return out, nil
 }
 
-func (r *Reconciler) DeleteAllSecretsFromStore(ctx context.Context, client esv1.SecretsClient, recorder *ctrlmetrics.StoreMetricsRecorder, data map[string]esapi.PushSecretData) error {
+func (r *Reconciler) DeleteAllSecretsFromStore(ctx context.Context, client esv1.SecretsClient, observe func(string, error), data map[string]esapi.PushSecretData) error {
 	for _, v := range data {
-		err := r.DeleteSecretFromStore(ctx, client, recorder, v)
+		err := r.DeleteSecretFromStore(ctx, client, observe, v)
 		if err != nil {
 			return err
 		}
@@ -377,9 +377,9 @@ func (r *Reconciler) DeleteAllSecretsFromStore(ctx context.Context, client esv1.
 	return nil
 }
 
-func (r *Reconciler) DeleteSecretFromStore(ctx context.Context, client esv1.SecretsClient, recorder *ctrlmetrics.StoreMetricsRecorder, data esapi.PushSecretData) error {
+func (r *Reconciler) DeleteSecretFromStore(ctx context.Context, client esv1.SecretsClient, observe func(string, error), data esapi.PushSecretData) error {
 	err := client.DeleteSecret(ctx, data.Match.RemoteRef)
-	recorder.Observe(ctrlmetrics.OperationDeleteSecret, err)
+	observe(ctrlmetrics.OperationDeleteSecret, err)
 	return err
 }
 
@@ -402,7 +402,7 @@ func (r *Reconciler) handlePushSecretDataForStore(ctx context.Context, ps esapi.
 		Kind: refKind,
 	}
 	originalSecretData := secret.Data
-	secretClient, recorder, err := mgr.Get(ctx, storeRef, ps.GetNamespace(), nil)
+	secretClient, observe, err := mgr.Get(ctx, storeRef, ps.GetNamespace(), nil)
 	if err != nil {
 		return out, fmt.Errorf("could not get secrets client for store %v: %w", storeName, err)
 	}
@@ -419,7 +419,7 @@ func (r *Reconciler) handlePushSecretDataForStore(ctx context.Context, ps esapi.
 		switch ps.Spec.UpdatePolicy {
 		case esapi.PushSecretUpdatePolicyIfNotExists:
 			exists, err := secretClient.SecretExists(ctx, data.Match.RemoteRef)
-			recorder.Observe(ctrlmetrics.OperationSecretExists, err)
+			observe(ctrlmetrics.OperationSecretExists, err)
 			if err != nil {
 				return out, fmt.Errorf("could not verify if secret exists in store: %w", err)
 			} else if exists {
@@ -430,7 +430,7 @@ func (r *Reconciler) handlePushSecretDataForStore(ctx context.Context, ps esapi.
 		default:
 		}
 		err = secretClient.PushSecret(ctx, secret, data)
-		recorder.Observe(ctrlmetrics.OperationPushSecret, err)
+		observe(ctrlmetrics.OperationPushSecret, err)
 		if err != nil {
 			return out, fmt.Errorf(errSetSecretFailed, key, storeName, err)
 		}

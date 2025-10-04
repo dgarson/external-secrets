@@ -160,21 +160,22 @@ func validateStore(ctx context.Context, namespace, controllerClass string, store
 		return fmt.Errorf(errStoreClient, err)
 	}
 
-	// Create metrics recorder for store API calls
+	// Create metrics observer for store API calls
 	providerType, _ := esapi.GetProviderName(store)
-	storeKind := "SecretStore"
-	if store.GetNamespace() == "" {
-		storeKind = "ClusterSecretStore"
-	}
-	metricsRecorder := ctrlmetrics.NewStoreMetricsRecorder(
+	observe := ctrlmetrics.NewStoreMetricsObserver(
 		store.GetName(),
-		storeKind,
+		func() string {
+			if store.GetNamespace() == "" {
+				return "ClusterSecretStore"
+			}
+			return "SecretStore"
+		}(),
 		store.GetNamespace(),
 		providerType,
 	)
 
 	validationResult, err := cl.Validate()
-	metricsRecorder.Observe(ctrlmetrics.OperationValidate, err)
+	observe(ctrlmetrics.OperationValidate, err)
 	if err != nil {
 		if validationResult == esapi.ValidationResultUnknown {
 			cond := NewSecretStoreCondition(esapi.SecretStoreReady, v1.ConditionTrue, esapi.ReasonValidationUnknown, errValidationUnknown)

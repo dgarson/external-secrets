@@ -105,11 +105,11 @@ func (m *Manager) GetFromStore(ctx context.Context, store esv1.GenericStore, nam
 	return secretClient, nil
 }
 
-// Get returns a provider client and metrics recorder from the given storeRef or sourceRef.secretStoreRef
+// Get returns a provider client and metrics observer function from the given storeRef or sourceRef.secretStoreRef
 // while sourceRef.SecretStoreRef takes precedence over storeRef.
-// The metrics recorder can be used to track API calls by SecretStore dimension when granular metrics are enabled.
+// The observer function can be used to track API calls by SecretStore dimension when granular metrics are enabled.
 // Do not close the client returned from this func, instead close the manager once you're done with reconciling.
-func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespace string, sourceRef *esv1.StoreGeneratorSourceRef) (esv1.SecretsClient, *ctrlmetrics.StoreMetricsRecorder, error) {
+func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespace string, sourceRef *esv1.StoreGeneratorSourceRef) (esv1.SecretsClient, func(string, error), error) {
 	if sourceRef != nil && sourceRef.SecretStoreRef != nil {
 		storeRef = *sourceRef.SecretStoreRef
 	}
@@ -142,20 +142,21 @@ func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespa
 		return nil, nil, err
 	}
 
-	// Create metrics recorder
+	// Create metrics observer function
 	providerType, _ := esapi.GetProviderName(store)
-	storeKind := "SecretStore"
-	if store.GetNamespace() == "" {
-		storeKind = "ClusterSecretStore"
-	}
-	recorder := ctrlmetrics.NewStoreMetricsRecorder(
+	observe := ctrlmetrics.NewStoreMetricsObserver(
 		store.GetName(),
-		storeKind,
+		func() string {
+			if store.GetNamespace() == "" {
+				return "ClusterSecretStore"
+			}
+			return "SecretStore"
+		}(),
 		store.GetNamespace(),
 		providerType,
 	)
 
-	return client, recorder, nil
+	return client, observe, nil
 }
 
 // returns a previously stored client from the cache if store and store-version match

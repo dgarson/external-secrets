@@ -127,7 +127,7 @@ var rootCmd = &cobra.Command{
 		setupLogger()
 
 		ctrlmetrics.SetUpLabelNames(enableExtendedMetricLabels)
-		ctrlmetrics.SetEnableGranularMetrics(enableGranularMetrics)
+		ctrlmetrics.EnableGranularMetrics = enableGranularMetrics
 		metrics.SetUpMetrics()
 		esmetrics.SetUpMetrics()
 		config := ctrl.GetConfigOrDie()

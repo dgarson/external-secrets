@@ -34,27 +34,23 @@ var gaugeVecMetrics = map[string]*prometheus.GaugeVec{}
 // SetUpMetrics is called at the root to set-up the metric logic using the
 // config flags provided.
 func SetUpMetrics() {
-	// Get label sets with optional granular labels
-	nonConditionLabels := ctrlmetrics.WithGranularLabels(
-		ctrlmetrics.NonConditionMetricLabelNames,
-		"provider_type",
-	)
-	conditionLabels := ctrlmetrics.WithGranularLabels(
-		ctrlmetrics.ConditionMetricLabelNames,
-		"provider_type",
-	)
-
 	secretStoreReconcileDuration := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SecretStoreSubsystem,
 		Name:      SecretStoreReconcileDurationKey,
 		Help:      "The duration time to reconcile the Secret Store",
-	}, nonConditionLabels)
+	}, ctrlmetrics.WithGranularLabels(
+		ctrlmetrics.NonConditionMetricLabelNames,
+		"provider_type",
+	))
 
 	secretStoreCondition := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SecretStoreSubsystem,
 		Name:      commonmetrics.StatusConditionKey,
 		Help:      "The status condition of a specific Secret Store",
-	}, conditionLabels)
+	}, ctrlmetrics.WithGranularLabels(
+		ctrlmetrics.ConditionMetricLabelNames,
+		"provider_type",
+	))
 
 	metrics.Registry.MustRegister(secretStoreReconcileDuration, secretStoreCondition)
 

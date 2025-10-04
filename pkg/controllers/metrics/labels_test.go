@@ -200,7 +200,7 @@ func TestRefineLabels(t *testing.T) {
 	}
 }
 
-func TestStoreMetricsRecorder_Observe(t *testing.T) {
+func TestStoreMetricsObserver(t *testing.T) {
 	// Save original state
 	origEnabled := EnableGranularMetrics
 	origCallback := observeStoreAPICallFunc
@@ -212,76 +212,61 @@ func TestStoreMetricsRecorder_Observe(t *testing.T) {
 	testCases := []struct {
 		description         string
 		enableGranular      bool
-		recorder            *StoreMetricsRecorder
+		storeName           string
+		storeKind           string
+		storeNamespace      string
+		providerType        string
 		operation           string
 		err                 error
 		setupCallback       bool
 		expectedCallbackRun bool
-		expectedStoreName   string
-		expectedStoreKind   string
-		expectedNamespace   string
-		expectedProvider    string
-		expectedOperation   string
 	}{
 		{
-			description:    "Granular metrics disabled - callback not run",
-			enableGranular: false,
-			recorder: &StoreMetricsRecorder{
-				storeName:      "test-store",
-				storeKind:      "SecretStore",
-				storeNamespace: "default",
-				providerType:   "vault",
-			},
+			description:         "Granular metrics disabled - returns no-op function",
+			enableGranular:      false,
+			storeName:           "test-store",
+			storeKind:           "SecretStore",
+			storeNamespace:      "default",
+			providerType:        "vault",
 			operation:           OperationGetSecret,
 			err:                 nil,
 			setupCallback:       true,
 			expectedCallbackRun: false,
 		},
 		{
-			description:    "Granular metrics enabled - SecretStore",
-			enableGranular: true,
-			recorder: &StoreMetricsRecorder{
-				storeName:      "test-store",
-				storeKind:      "SecretStore",
-				storeNamespace: "default",
-				providerType:   "vault",
-			},
+			description:         "Granular metrics enabled - SecretStore",
+			enableGranular:      true,
+			storeName:           "test-store",
+			storeKind:           "SecretStore",
+			storeNamespace:      "default",
+			providerType:        "vault",
 			operation:           OperationGetSecret,
 			err:                 nil,
 			setupCallback:       true,
 			expectedCallbackRun: true,
-			expectedStoreName:   "test-store",
-			expectedStoreKind:   "SecretStore",
-			expectedNamespace:   "default",
-			expectedProvider:    "vault",
-			expectedOperation:   OperationGetSecret,
 		},
 		{
-			description:    "Granular metrics enabled - ClusterSecretStore",
-			enableGranular: true,
-			recorder: &StoreMetricsRecorder{
-				storeName:      "cluster-store",
-				storeKind:      "ClusterSecretStore",
-				storeNamespace: "",
-				providerType:   "aws",
-			},
+			description:         "Granular metrics enabled - ClusterSecretStore",
+			enableGranular:      true,
+			storeName:           "cluster-store",
+			storeKind:           "ClusterSecretStore",
+			storeNamespace:      "",
+			providerType:        "aws",
 			operation:           OperationPushSecret,
 			err:                 nil,
 			setupCallback:       true,
 			expectedCallbackRun: true,
-			expectedStoreName:   "cluster-store",
-			expectedStoreKind:   "ClusterSecretStore",
-			expectedNamespace:   "",
-			expectedProvider:    "aws",
-			expectedOperation:   OperationPushSecret,
 		},
 		{
-			description:         "Nil recorder - no panic",
+			description:         "No callback set - function doesn't panic",
 			enableGranular:      true,
-			recorder:            nil,
+			storeName:           "test-store",
+			storeKind:           "SecretStore",
+			storeNamespace:      "default",
+			providerType:        "vault",
 			operation:           OperationValidate,
 			err:                 nil,
-			setupCallback:       true,
+			setupCallback:       false,
 			expectedCallbackRun: false,
 		},
 	}
@@ -308,8 +293,9 @@ func TestStoreMetricsRecorder_Observe(t *testing.T) {
 				observeStoreAPICallFunc = nil
 			}
 
-			// Execute
-			tc.recorder.Observe(tc.operation, tc.err)
+			// Create observer and execute
+			observe := NewStoreMetricsObserver(tc.storeName, tc.storeKind, tc.storeNamespace, tc.providerType)
+			observe(tc.operation, tc.err)
 
 			// Verify
 			if callbackRun != tc.expectedCallbackRun {
@@ -317,20 +303,20 @@ func TestStoreMetricsRecorder_Observe(t *testing.T) {
 			}
 
 			if tc.expectedCallbackRun {
-				if capturedStoreName != tc.expectedStoreName {
-					t.Errorf("Expected storeName=%q, got=%q", tc.expectedStoreName, capturedStoreName)
+				if capturedStoreName != tc.storeName {
+					t.Errorf("Expected storeName=%q, got=%q", tc.storeName, capturedStoreName)
 				}
-				if capturedStoreKind != tc.expectedStoreKind {
-					t.Errorf("Expected storeKind=%q, got=%q", tc.expectedStoreKind, capturedStoreKind)
+				if capturedStoreKind != tc.storeKind {
+					t.Errorf("Expected storeKind=%q, got=%q", tc.storeKind, capturedStoreKind)
 				}
-				if capturedNamespace != tc.expectedNamespace {
-					t.Errorf("Expected namespace=%q, got=%q", tc.expectedNamespace, capturedNamespace)
+				if capturedNamespace != tc.storeNamespace {
+					t.Errorf("Expected namespace=%q, got=%q", tc.storeNamespace, capturedNamespace)
 				}
-				if capturedProvider != tc.expectedProvider {
-					t.Errorf("Expected provider=%q, got=%q", tc.expectedProvider, capturedProvider)
+				if capturedProvider != tc.providerType {
+					t.Errorf("Expected provider=%q, got=%q", tc.providerType, capturedProvider)
 				}
-				if capturedOperation != tc.expectedOperation {
-					t.Errorf("Expected operation=%q, got=%q", tc.expectedOperation, capturedOperation)
+				if capturedOperation != tc.operation {
+					t.Errorf("Expected operation=%q, got=%q", tc.operation, capturedOperation)
 				}
 				if capturedErr != tc.err {
 					t.Errorf("Expected err=%v, got=%v", tc.err, capturedErr)
@@ -340,22 +326,80 @@ func TestStoreMetricsRecorder_Observe(t *testing.T) {
 	}
 }
 
-func TestNewStoreMetricsRecorder(t *testing.T) {
-	recorder := NewStoreMetricsRecorder("my-store", "SecretStore", "default", "vault")
+func TestNewStoreMetricsObserver(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	defer func() {
+		EnableGranularMetrics = origEnabled
+	}()
 
-	if recorder == nil {
-		t.Fatal("Expected non-nil recorder")
-	}
-	if recorder.storeName != "my-store" {
-		t.Errorf("Expected storeName=my-store, got=%s", recorder.storeName)
-	}
-	if recorder.storeKind != "SecretStore" {
-		t.Errorf("Expected storeKind=SecretStore, got=%s", recorder.storeKind)
-	}
-	if recorder.storeNamespace != "default" {
-		t.Errorf("Expected storeNamespace=default, got=%s", recorder.storeNamespace)
-	}
-	if recorder.providerType != "vault" {
-		t.Errorf("Expected providerType=vault, got=%s", recorder.providerType)
-	}
+	t.Run("Returns non-nil function when granular metrics enabled", func(t *testing.T) {
+		EnableGranularMetrics = true
+		observe := NewStoreMetricsObserver("my-store", "SecretStore", "default", "vault")
+
+		if observe == nil {
+			t.Fatal("Expected non-nil observer function")
+		}
+	})
+
+	t.Run("Returns non-nil no-op function when granular metrics disabled", func(t *testing.T) {
+		EnableGranularMetrics = false
+		observe := NewStoreMetricsObserver("my-store", "SecretStore", "default", "vault")
+
+		if observe == nil {
+			t.Fatal("Expected non-nil observer function (no-op)")
+		}
+
+		// Should not panic when called
+		observe(OperationGetSecret, nil)
+	})
+}
+
+func TestWithGranularLabels(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	defer func() {
+		EnableGranularMetrics = origEnabled
+	}()
+
+	baseLabels := []string{"provider", "call", "status"}
+
+	t.Run("Granular metrics disabled - returns only base labels", func(t *testing.T) {
+		EnableGranularMetrics = false
+		result := WithGranularLabels(baseLabels, "extra1", "extra2")
+
+		expectedLabels := []string{"provider", "call", "status"}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Granular metrics enabled - returns base + granular labels", func(t *testing.T) {
+		EnableGranularMetrics = true
+		result := WithGranularLabels(baseLabels, "extra1", "extra2")
+
+		expectedLabels := []string{"provider", "call", "status", "extra1", "extra2"}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Returns copy to prevent mutation", func(t *testing.T) {
+		EnableGranularMetrics = true
+		result1 := WithGranularLabels(baseLabels, "extra1")
+		result2 := WithGranularLabels(baseLabels, "extra2")
+
+		// Modify result1
+		result1[0] = "modified"
+
+		// result2 should not be affected
+		if result2[0] == "modified" {
+			t.Error("Modifying one result affected another - slice was not copied properly")
+		}
+
+		// baseLabels should not be affected
+		if baseLabels[0] == "modified" {
+			t.Error("Modifying result affected base labels - slice was not copied properly")
+		}
+	})
 }

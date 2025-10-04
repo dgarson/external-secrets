@@ -122,14 +122,14 @@ func (r *Reconciler) GetProviderSecretData(ctx context.Context, externalSecret *
 }
 
 func (r *Reconciler) handleSecretData(ctx context.Context, externalSecret *esv1.ExternalSecret, secretRef esv1.ExternalSecretData, providerData map[string][]byte, cmgr *secretstore.Manager) error {
-	client, recorder, err := cmgr.Get(ctx, externalSecret.Spec.SecretStoreRef, externalSecret.Namespace, toStoreGenSourceRef(secretRef.SourceRef))
+	client, observe, err := cmgr.Get(ctx, externalSecret.Spec.SecretStoreRef, externalSecret.Namespace, toStoreGenSourceRef(secretRef.SourceRef))
 	if err != nil {
 		return err
 	}
 
 	// get a single secret from the store
 	secretData, err := client.GetSecret(ctx, secretRef.RemoteRef)
-	recorder.Observe(ctrlmetrics.OperationGetSecret, err)
+	observe(ctrlmetrics.OperationGetSecret, err)
 	if err != nil {
 		return err
 	}
@@ -202,14 +202,14 @@ func generatorStateKey(i int) string {
 }
 
 func (r *Reconciler) handleExtractSecrets(ctx context.Context, externalSecret *esv1.ExternalSecret, remoteRef esv1.ExternalSecretDataFromRemoteRef, cmgr *secretstore.Manager, genState *statemanager.Manager, i int) (map[string][]byte, error) {
-	client, recorder, err := cmgr.Get(ctx, externalSecret.Spec.SecretStoreRef, externalSecret.Namespace, remoteRef.SourceRef)
+	client, observe, err := cmgr.Get(ctx, externalSecret.Spec.SecretStoreRef, externalSecret.Namespace, remoteRef.SourceRef)
 	if err != nil {
 		return nil, err
 	}
 
 	// get multiple secrets from the store
 	secretMap, err := client.GetSecretMap(ctx, *remoteRef.Extract)
-	recorder.Observe(ctrlmetrics.OperationGetSecretMap, err)
+	observe(ctrlmetrics.OperationGetSecretMap, err)
 	if err != nil {
 		return nil, err
 	}
@@ -244,14 +244,14 @@ func (r *Reconciler) handleExtractSecrets(ctx context.Context, externalSecret *e
 }
 
 func (r *Reconciler) handleFindAllSecrets(ctx context.Context, externalSecret *esv1.ExternalSecret, remoteRef esv1.ExternalSecretDataFromRemoteRef, cmgr *secretstore.Manager, genState *statemanager.Manager, i int) (map[string][]byte, error) {
-	client, recorder, err := cmgr.Get(ctx, externalSecret.Spec.SecretStoreRef, externalSecret.Namespace, remoteRef.SourceRef)
+	client, observe, err := cmgr.Get(ctx, externalSecret.Spec.SecretStoreRef, externalSecret.Namespace, remoteRef.SourceRef)
 	if err != nil {
 		return nil, err
 	}
 
 	// get all secrets from the store that match the selector
 	secretMap, err := client.GetAllSecrets(ctx, *remoteRef.Find)
-	recorder.Observe(ctrlmetrics.OperationGetAllSecrets, err)
+	observe(ctrlmetrics.OperationGetAllSecrets, err)
 	if err != nil {
 		return nil, fmt.Errorf("error getting all secrets: %w", err)
 	}

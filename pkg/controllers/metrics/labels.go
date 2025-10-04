@@ -41,11 +41,6 @@ func init() {
 	nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
 }
 
-// SetEnableGranularMetrics sets whether granular metrics should be enabled
-func SetEnableGranularMetrics(enabled bool) {
-	EnableGranularMetrics = enabled
-}
-
 // SetUpLabelNames initializes both non-conditional and conditional metric labels and label names.
 func SetUpLabelNames(addKubeStandardLabels bool) {
 	NonConditionMetricLabelNames = []string{"name", "namespace"}
@@ -167,35 +162,18 @@ const (
 	OperationValidate      = "Validate"
 )
 
-// StoreMetricsRecorder helps record provider API call metrics for a specific SecretStore.
-// It encapsulates store context to avoid duplicating metric recording code across controllers.
-type StoreMetricsRecorder struct {
-	storeName      string
-	storeKind      string
-	storeNamespace string
-	providerType   string
-}
-
-// NewStoreMetricsRecorder creates a metrics recorder for the given SecretStore or ClusterSecretStore.
-// The recorder can be used to consistently record provider API operations for that store.
-func NewStoreMetricsRecorder(storeName, storeKind, storeNamespace, providerType string) *StoreMetricsRecorder {
-	return &StoreMetricsRecorder{
-		storeName:      storeName,
-		storeKind:      storeKind,
-		storeNamespace: storeNamespace,
-		providerType:   providerType,
-	}
-}
-
-// Observe records a provider API operation for this SecretStore.
-// Only records when EnableGranularMetrics is true.
-func (r *StoreMetricsRecorder) Observe(operation string, err error) {
-	if !EnableGranularMetrics || r == nil {
-		return
+// NewStoreMetricsObserver creates an observer function for recording provider API calls
+// for the given SecretStore or ClusterSecretStore.
+// Returns a no-op function when EnableGranularMetrics is false.
+func NewStoreMetricsObserver(storeName, storeKind, storeNamespace, providerType string) func(operation string, err error) {
+	if !EnableGranularMetrics {
+		return func(string, error) {} // no-op
 	}
 
-	if observeStoreAPICallFunc != nil {
-		observeStoreAPICallFunc(r.storeName, r.storeKind, r.storeNamespace, r.providerType, operation, err)
+	return func(operation string, err error) {
+		if observeStoreAPICallFunc != nil {
+			observeStoreAPICallFunc(storeName, storeKind, storeNamespace, providerType, operation, err)
+		}
 	}
 }
 
