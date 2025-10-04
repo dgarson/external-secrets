@@ -418,6 +418,25 @@ The provider automatically detects which authentication method is available and 
 ```
 **NOTE:** In case of a `ClusterSecretStore`, Be sure to provide `namespace` in `secretRef` with the namespace where the secret resides.
 
+### Experimental Token Cache (advanced)
+
+External Secrets Operator can reuse Vault sessions when the controller flag `--experimental-enable-vault-token-cache` is set. Two related knobs are provided:
+
+- `--experimental-vault-token-cache-size` — Maximum number of cached clients (default `131072`).
+- `--experimental-vault-token-cache-safety-window` — Duration before a token expires that forces a new login (default `1m`).
+
+Each cached entry is keyed by:
+
+- A qualifier (`store|…` or `generator|…`) so Store traffic and generator traffic do not clash.
+- Store identity (kind, namespace, name) to scope tokens per SecretStore/ClusterSecretStore.
+- Vault address and the effective auth namespace to avoid cross-cluster reuse.
+- Store resource version and a hash of the Vault spec (TLS + auth settings) so any configuration change invalidates the cached session.
+- For referent ClusterSecretStores, the target namespace is added to the fingerprint because different namespaces often require different auth credentials.
+
+Cached sessions are automatically invalidated when the Store spec changes, when Vault replies with `401/403` (or well-known token errors such as “permission denied” or “expired token”), or when the cache evicts the least recently used entry to keep within its size limit. Generator-based flows (`generatorRef: vaultDynamicSecret`) participate in the same cache under the `generator` scope.
+
+The following Prometheus metrics are emitted to describe cache health: `vault_token_cache_hits_total`, `vault_token_cache_misses_total`, `vault_token_cache_invalidations_total` (with a `reason` label), `vault_token_cache_evictions_total`, and `vault_token_cache_entries`. See [Vault token cache metrics](../api/metrics.md#vault-token-cache-metrics) for details. Cache log lines are emitted at debug level (`-v=1`).
+
 ### PushSecret
 
 Vault supports PushSecret features which allow you to sync a given Kubernetes secret key into a Hashicorp vault secret. To do so, it is expected that the secret key is a valid JSON object or that the `property` attribute has been specified under the `remoteRef`.

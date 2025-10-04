@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-logr/logr"
 	vault "github.com/hashicorp/vault/api"
@@ -31,6 +32,7 @@ import (
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/session"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
@@ -39,16 +41,18 @@ import (
 var _ esv1.SecretsClient = &client{}
 
 type client struct {
-	kube      kclient.Client
-	store     *esv1.VaultProvider
-	log       logr.Logger
-	corev1    typedcorev1.CoreV1Interface
-	client    util.Client
-	auth      util.Auth
-	logical   util.Logical
-	token     util.Token
-	namespace string
-	storeKind string
+	kube          kclient.Client
+	store         *esv1.VaultProvider
+	log           logr.Logger
+	corev1        typedcorev1.CoreV1Interface
+	client        util.Client
+	auth          util.Auth
+	logical       util.Logical
+	token         util.Token
+	namespace     string
+	storeKind     string
+	sessionHandle *session.Handle
+	sessionLease  *session.Lease
 }
 
 func (c *client) newConfig(ctx context.Context) (*vault.Config, error) {
@@ -128,5 +132,42 @@ func (c *client) Close(ctx context.Context) error {
 			return err
 		}
 	}
+	if c.sessionHandle != nil {
+		c.sessionHandle.Release(ctx)
+	}
 	return nil
+}
+
+var authErrorHints = []string{
+	"permission denied",
+	"invalid or missing client token",
+	"invalid client token",
+	"token is expired",
+	"expired token",
+	"lease is not valid",
+	"invalid lease",
+}
+
+func (c *client) invalidateSessionOnAuthFailure(ctx context.Context, err error) {
+	if err == nil || c.sessionHandle == nil {
+		return
+	}
+	var respErr *vault.ResponseError
+	if errors.As(err, &respErr) {
+		if respErr.StatusCode == http.StatusUnauthorized || respErr.StatusCode == http.StatusForbidden {
+			c.log.V(1).Info("invalidating cached vault session after auth failure", "status", respErr.StatusCode)
+			c.sessionLease = nil
+			c.sessionHandle.Invalidate(ctx)
+		}
+		return
+	}
+	lower := strings.ToLower(err.Error())
+	for _, hint := range authErrorHints {
+		if strings.Contains(lower, hint) {
+			c.log.V(1).Info("invalidating cached vault session after error", "hint", hint)
+			c.sessionLease = nil
+			c.sessionHandle.Invalidate(ctx)
+			return
+		}
+	}
 }

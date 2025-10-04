@@ -26,6 +26,15 @@ The Operator has [the controller-runtime metrics inherited from kubebuilder](htt
 | `externalsecret_status_condition`              | Gauge     | The status condition of a specific External Secret                                                                                                                                                                      |
 | `externalsecret_reconcile_duration`            | Gauge     | The duration time to reconcile the External Secret                                                                                                                                                                      |
 
+### Vault token cache metrics
+| Name                                       | Type    | Description                                                                                                         |
+|--------------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------|
+| `vault_token_cache_hits_total`             | Counter | Number of times a cached Vault client was reused without re-authentication.                                        |
+| `vault_token_cache_misses_total`           | Counter | Number of times ESO had to create a new Vault client/token instead of reusing a cached entry.                     |
+| `vault_token_cache_invalidations_total`    | Counter | Number of cached sessions invalidated. The metric exposes a `reason` label (e.g. `fingerprint`, `manual`, `error`).|
+| `vault_token_cache_evictions_total`        | Counter | Number of cached sessions evicted due to reaching the configured cache size.                                       |
+| `vault_token_cache_entries`                | Gauge   | Current count of active Vault client cache entries.                                                                |
+
 ## Push Secret Metrics
 | Name                                    | Type  | Description                                             |
 |-----------------------------------------|-------|---------------------------------------------------------|
