@@ -28,33 +28,35 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
-func setUserPassAuthToken(ctx context.Context, v *client) (bool, error) {
+func setUserPassAuthToken(ctx context.Context, v *client) (bool, *TokenMetadata, error) {
 	userPassAuth := v.store.Auth.UserPass
 	if userPassAuth != nil {
-		err := v.requestTokenWithUserPassAuth(ctx, userPassAuth)
+		metadata, err := v.requestTokenWithUserPassAuth(ctx, userPassAuth)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
-		return true, nil
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (c *client) requestTokenWithUserPassAuth(ctx context.Context, userPassAuth *esv1.VaultUserPassAuth) error {
+func (c *client) requestTokenWithUserPassAuth(ctx context.Context, userPassAuth *esv1.VaultUserPassAuth) (*TokenMetadata, error) {
 	username := strings.TrimSpace(userPassAuth.Username)
 	password, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &userPassAuth.SecretRef)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pass := authuserpass.Password{FromString: password}
 	l, err := authuserpass.NewUserpassAuth(username, &pass, authuserpass.WithMountPath(userPassAuth.Path))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = c.auth.Login(ctx, l)
+	secret, err := c.auth.Login(ctx, l)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	// Extract and return metadata
+	return extractTokenMetadata(secret), nil
 }

@@ -32,19 +32,19 @@ const (
 	errJwtNoTokenSource = "neither `secretRef` nor `kubernetesServiceAccountToken` was supplied as token source for jwt authentication"
 )
 
-func setJwtAuthToken(ctx context.Context, v *client) (bool, error) {
+func setJwtAuthToken(ctx context.Context, v *client) (bool, *TokenMetadata, error) {
 	jwtAuth := v.store.Auth.Jwt
 	if jwtAuth != nil {
-		err := v.requestTokenWithJwtAuth(ctx, jwtAuth)
+		metadata, err := v.requestTokenWithJwtAuth(ctx, jwtAuth)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
-		return true, nil
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.VaultJwtAuth) error {
+func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.VaultJwtAuth) (*TokenMetadata, error) {
 	role := strings.TrimSpace(jwtAuth.Role)
 	var jwt string
 	var err error
@@ -72,7 +72,7 @@ func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.Vaul
 		err = errors.New(errJwtNoTokenSource)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	parameters := map[string]any{
@@ -83,13 +83,15 @@ func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.Vaul
 	vaultResult, err := c.logical.WriteWithContext(ctx, url, parameters)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	token, err := vaultResult.TokenID()
 	if err != nil {
-		return fmt.Errorf(errVaultToken, err)
+		return nil, fmt.Errorf(errVaultToken, err)
 	}
 	c.client.SetToken(token)
-	return nil
+
+	// Extract and return metadata
+	return extractTokenMetadata(vaultResult), nil
 }

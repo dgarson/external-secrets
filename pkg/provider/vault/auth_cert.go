@@ -35,32 +35,32 @@ const (
 	errVaultRequest = "error from Vault request: %w"
 )
 
-func setCertAuthToken(ctx context.Context, v *client, cfg *vault.Config) (bool, error) {
+func setCertAuthToken(ctx context.Context, v *client, cfg *vault.Config) (bool, *TokenMetadata, error) {
 	certAuth := v.store.Auth.Cert
 	if certAuth != nil {
-		err := v.requestTokenWithCertAuth(ctx, certAuth, cfg)
+		metadata, err := v.requestTokenWithCertAuth(ctx, certAuth, cfg)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
-		return true, nil
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.VaultCertAuth, cfg *vault.Config) error {
+func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.VaultCertAuth, cfg *vault.Config) (*TokenMetadata, error) {
 	clientKey, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &certAuth.SecretRef)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	clientCert, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &certAuth.ClientCert)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cert, err := tls.X509KeyPair([]byte(clientCert), []byte(clientKey))
 	if err != nil {
-		return fmt.Errorf(errClientTLSAuth, err)
+		return nil, fmt.Errorf(errClientTLSAuth, err)
 	}
 
 	if transport, ok := cfg.HttpClient.Transport.(*http.Transport); ok {
@@ -71,12 +71,14 @@ func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.Va
 	vaultResult, err := c.logical.WriteWithContext(ctx, url, nil)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
 	if err != nil {
-		return fmt.Errorf(errVaultRequest, err)
+		return nil, fmt.Errorf(errVaultRequest, err)
 	}
 	token, err := vaultResult.TokenID()
 	if err != nil {
-		return fmt.Errorf(errVaultToken, err)
+		return nil, fmt.Errorf(errVaultToken, err)
 	}
 	c.client.SetToken(token)
-	return nil
+
+	// Extract and return metadata
+	return extractTokenMetadata(vaultResult), nil
 }

@@ -18,19 +18,25 @@ package vault
 
 import (
 	"context"
+	"time"
 
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
-func setSecretKeyToken(ctx context.Context, v *client) (bool, error) {
+func setSecretKeyToken(ctx context.Context, v *client) (bool, *TokenMetadata, error) {
 	tokenRef := v.store.Auth.TokenSecretRef
 	if tokenRef != nil {
 		token, err := resolvers.SecretKeyRef(ctx, v.kube, v.storeKind, v.namespace, tokenRef)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
 		v.client.SetToken(token)
-		return true, nil
+		// For static tokens, we don't have Secret metadata, return default
+		metadata := &TokenMetadata{
+			Expiry:    time.Now().Add(1 * time.Hour),
+			Renewable: false,
+		}
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }

@@ -139,7 +139,7 @@ func TestSetAuthNamespace(t *testing.T) {
 				t.Error(err.Error())
 			}
 
-			client, err := getVaultClient(prov, tc.args.store, cfg, "default")
+			client, err := getVaultClient(context.Background(), prov, c, tc.args.store, cfg, "default")
 			if err != nil {
 				t.Errorf("vault.useAuthNamespace: failed to create client: %s", err.Error())
 			}

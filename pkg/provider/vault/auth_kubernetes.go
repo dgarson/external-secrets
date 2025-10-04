@@ -41,33 +41,35 @@ const (
 	errServiceAccountNotFound = "serviceaccounts %q not found"
 )
 
-func setKubernetesAuthToken(ctx context.Context, v *client) (bool, error) {
+func setKubernetesAuthToken(ctx context.Context, v *client) (bool, *TokenMetadata, error) {
 	kubernetesAuth := v.store.Auth.Kubernetes
 	if kubernetesAuth != nil {
-		err := v.requestTokenWithKubernetesAuth(ctx, kubernetesAuth)
+		metadata, err := v.requestTokenWithKubernetesAuth(ctx, kubernetesAuth)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
-		return true, nil
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (c *client) requestTokenWithKubernetesAuth(ctx context.Context, kubernetesAuth *esv1.VaultKubernetesAuth) error {
+func (c *client) requestTokenWithKubernetesAuth(ctx context.Context, kubernetesAuth *esv1.VaultKubernetesAuth) (*TokenMetadata, error) {
 	jwtString, err := getJwtString(ctx, c, kubernetesAuth)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	k, err := authkubernetes.NewKubernetesAuth(kubernetesAuth.Role, authkubernetes.WithServiceAccountToken(jwtString), authkubernetes.WithMountPath(kubernetesAuth.Path))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = c.auth.Login(ctx, k)
+	secret, err := c.auth.Login(ctx, k)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	// Extract and return metadata
+	return extractTokenMetadata(secret), nil
 }
 
 func getJwtString(ctx context.Context, v *client, kubernetesAuth *esv1.VaultKubernetesAuth) (string, error) {

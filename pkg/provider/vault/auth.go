@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	vault "github.com/hashicorp/vault/api"
 	authv1 "k8s.io/api/authentication/v1"
@@ -42,11 +43,41 @@ const (
 	errVaultRevokeToken      = "error while revoking token: %w"
 )
 
+// TokenMetadata contains token lifecycle information for caching.
+type TokenMetadata struct {
+	Expiry    time.Time
+	Renewable bool
+}
+
+// extractTokenMetadata extracts metadata from a Vault auth response.
+func extractTokenMetadata(secret *vault.Secret) *TokenMetadata {
+	if secret == nil || secret.Auth == nil {
+		// Default to 1 hour expiry, non-renewable
+		return &TokenMetadata{
+			Expiry:    time.Now().Add(1 * time.Hour),
+			Renewable: false,
+		}
+	}
+
+	metadata := &TokenMetadata{
+		Renewable: secret.Auth.Renewable,
+	}
+
+	if secret.Auth.LeaseDuration > 0 {
+		metadata.Expiry = time.Now().Add(time.Duration(secret.Auth.LeaseDuration) * time.Second)
+	} else {
+		// Default to 1 hour if no lease duration
+		metadata.Expiry = time.Now().Add(1 * time.Hour)
+	}
+
+	return metadata
+}
+
 // setAuth gets a new token using the configured mechanism.
 // If there's already a valid token, does nothing.
-func (c *client) setAuth(ctx context.Context, cfg *vault.Config) error {
+func (c *client) setAuth(ctx context.Context, cfg *vault.Config) (*TokenMetadata, error) {
 	if c.store.Auth == nil {
-		return nil
+		return nil, nil
 	}
 
 	if c.store.Namespace != nil { // set namespace before checking the need for AuthNamespace
@@ -64,57 +95,59 @@ func (c *client) setAuth(ctx context.Context, cfg *vault.Config) error {
 	}
 	if tokenExists {
 		c.log.V(1).Info("Re-using existing token")
-		return err
+		// For reused tokens, we don't have fresh metadata, return nil
+		return nil, err
 	}
 
-	tokenExists, err = setSecretKeyToken(ctx, c)
+	var metadata *TokenMetadata
+	tokenExists, metadata, err = setSecretKeyToken(ctx, c)
 	if tokenExists {
 		c.log.V(1).Info("Set token from secret")
-		return err
+		return metadata, err
 	}
 
-	tokenExists, err = setAppRoleToken(ctx, c)
+	tokenExists, metadata, err = setAppRoleToken(ctx, c)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using AppRole auth")
-		return err
+		return metadata, err
 	}
 
-	tokenExists, err = setKubernetesAuthToken(ctx, c)
+	tokenExists, metadata, err = setKubernetesAuthToken(ctx, c)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using Kubernetes auth")
-		return err
+		return metadata, err
 	}
 
-	tokenExists, err = setLdapAuthToken(ctx, c)
+	tokenExists, metadata, err = setLdapAuthToken(ctx, c)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using LDAP auth")
-		return err
+		return metadata, err
 	}
 
-	tokenExists, err = setUserPassAuthToken(ctx, c)
+	tokenExists, metadata, err = setUserPassAuthToken(ctx, c)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using userPass auth")
-		return err
+		return metadata, err
 	}
-	tokenExists, err = setJwtAuthToken(ctx, c)
+	tokenExists, metadata, err = setJwtAuthToken(ctx, c)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using JWT auth")
-		return err
+		return metadata, err
 	}
 
-	tokenExists, err = setCertAuthToken(ctx, c, cfg)
+	tokenExists, metadata, err = setCertAuthToken(ctx, c, cfg)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using certificate auth")
-		return err
+		return metadata, err
 	}
 
-	tokenExists, err = setIamAuthToken(ctx, c, vaultiamauth.DefaultJWTProvider, vaultiamauth.DefaultSTSProvider)
+	tokenExists, metadata, err = setIamAuthToken(ctx, c, vaultiamauth.DefaultJWTProvider, vaultiamauth.DefaultSTSProvider)
 	if tokenExists {
 		c.log.V(1).Info("Retrieved new token using IAM auth")
-		return err
+		return metadata, err
 	}
 
-	return errors.New(errAuthFormat)
+	return nil, errors.New(errAuthFormat)
 }
 
 func createServiceAccountToken(

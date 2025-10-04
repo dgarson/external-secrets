@@ -47,20 +47,20 @@ const (
 	errIrsaTokenNotValidClaims    = "could not find pod identity info on token %s"
 )
 
-func setIamAuthToken(ctx context.Context, v *client, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) (bool, error) {
+func setIamAuthToken(ctx context.Context, v *client, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) (bool, *TokenMetadata, error) {
 	iamAuth := v.store.Auth.Iam
 	isClusterKind := v.storeKind == esv1.ClusterSecretStoreKind
 	if iamAuth != nil {
-		err := v.requestTokenWithIamAuth(ctx, iamAuth, isClusterKind, v.kube, v.namespace, jwtProvider, assumeRoler)
+		metadata, err := v.requestTokenWithIamAuth(ctx, iamAuth, isClusterKind, v.kube, v.namespace, jwtProvider, assumeRoler)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
-		return true, nil
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.VaultIamAuth, isClusterKind bool, k kclient.Client, n string, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) error {
+func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.VaultIamAuth, isClusterKind bool, k kclient.Client, n string, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) (*TokenMetadata, error) {
 	jwtAuth := iamAuth.JWTAuth
 	secretRefAuth := iamAuth.SecretRef
 	regionAWS := c.getRegionOrDefault(iamAuth.Region)
@@ -71,13 +71,13 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	if jwtAuth != nil { // use credentials from a sa explicitly defined and referenced. Highest preference is given to this method/configuration.
 		creds, err = vaultiamauth.CredsFromServiceAccount(ctx, *iamAuth, regionAWS, isClusterKind, k, n, jwtProvider)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else if secretRefAuth != nil { // if jwtAuth is not defined, check if secretRef is defined. Second preference.
 		logger.V(1).Info("using credentials from secretRef")
 		creds, err = vaultiamauth.CredsFromSecretRef(ctx, *iamAuth, c.storeKind, k, n)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -86,7 +86,7 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	if jwtAuth == nil && secretRefAuth == nil {
 		creds, err = c.getControllerPodCredentials(ctx, regionAWS, k, jwtProvider)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -101,7 +101,7 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 
 	sess, err := vaultiamauth.GetAWSSession(config)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if iamAuth.AWSIAMRole != "" {
 		stsclient := assumeRoler(sess)
@@ -117,7 +117,7 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 
 	getCreds, err := sess.Config.Credentials.Get()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Set environment variables. These would be fetched by Login
 	_ = os.Setenv("AWS_ACCESS_KEY_ID", getCreds.AccessKeyID)
@@ -129,21 +129,23 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	if iamAuth.VaultAWSIAMServerID != "" {
 		awsAuthClient, err = authaws.NewAWSAuth(authaws.WithRegion(regionAWS), authaws.WithIAMAuth(), authaws.WithRole(iamAuth.Role), authaws.WithMountPath(awsAuthMountPath), authaws.WithIAMServerIDHeader(iamAuth.VaultAWSIAMServerID))
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		awsAuthClient, err = authaws.NewAWSAuth(authaws.WithRegion(regionAWS), authaws.WithIAMAuth(), authaws.WithRole(iamAuth.Role), authaws.WithMountPath(awsAuthMountPath))
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	_, err = c.auth.Login(ctx, awsAuthClient)
+	secret, err := c.auth.Login(ctx, awsAuthClient)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	// Extract and return metadata
+	return extractTokenMetadata(secret), nil
 }
 
 func (c *client) getRegionOrDefault(region string) string {

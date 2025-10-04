@@ -18,6 +18,7 @@ package vault
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -31,17 +32,17 @@ import (
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
-	"github.com/external-secrets/external-secrets/pkg/cache"
 	"github.com/external-secrets/external-secrets/pkg/feature"
+	vaultcache "github.com/external-secrets/external-secrets/pkg/provider/vault/cache"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
 var (
-	_           esv1.Provider = &Provider{}
-	enableCache bool
-	logger      = ctrl.Log.WithName("provider").WithName("vault")
-	clientCache *cache.Cache[util.Client]
+	_             esv1.Provider = &Provider{}
+	enableCache   bool
+	logger        = ctrl.Log.WithName("provider").WithName("vault")
+	clientManager *vaultcache.ClientManager
 )
 
 const (
@@ -108,17 +109,105 @@ func (p *Provider) NewGeneratorClient(ctx context.Context, kube kclient.Client, 
 		return nil, err
 	}
 
-	client, err := p.NewVaultClient(cfg)
-	if err != nil {
-		return nil, err
+	// Check if we should use cache
+	auth := vaultSpec.Auth
+	isStaticToken := auth != nil && auth.TokenSecretRef != nil
+
+	// Static tokens or cache disabled - create client directly
+	if isStaticToken || clientManager == nil {
+		client, err := p.NewVaultClient(cfg)
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = p.initClient(ctx, vStore, client, cfg, vaultSpec)
+		if err != nil {
+			return nil, err
+		}
+
+		return client, nil
 	}
 
-	_, err = p.initClient(ctx, vStore, client, cfg, vaultSpec)
-	if err != nil {
-		return nil, err
+	// Build cache configuration for generators
+	clientConfig := &vaultcache.ClientConfig{
+		VaultAddr:  vaultSpec.Server,
+		AuthMethod: determineAuthMethod(vaultSpec.Auth),
+		AuthParams: extractAuthParams(vaultSpec.Auth),
+		Headers:    make(map[string]string),
 	}
 
-	return client, nil
+	// Namespace
+	if vaultSpec.Namespace != nil {
+		clientConfig.Namespace = *vaultSpec.Namespace
+	}
+
+	// Headers
+	if vaultSpec.Headers != nil {
+		for k, v := range vaultSpec.Headers {
+			clientConfig.Headers[k] = v
+		}
+	}
+
+	// Read-your-writes headers
+	clientConfig.ReadYourWrites = vaultSpec.ReadYourWrites
+	clientConfig.ForwardInconsistent = vaultSpec.ForwardInconsistent
+
+	// Auth context for invalidation
+	clientConfig.AuthContext = buildAuthContext(vaultSpec, namespace, resolvers.EmptyStoreKind)
+
+	// TLS config hashes
+	if len(vaultSpec.CABundle) > 0 {
+		clientConfig.TLSConfig = &vaultcache.TLSConfig{
+			CABundle:   vaultSpec.CABundle,
+			CACertHash: computeHash(vaultSpec.CABundle),
+		}
+	}
+
+	// Create client via cache
+	return clientManager.GetClient(ctx, *clientConfig, func() (util.Client, time.Time, bool, error) {
+		// This function is only called on cache miss
+		vaultClient, err := p.NewVaultClient(cfg)
+		if err != nil {
+			return nil, time.Time{}, false, fmt.Errorf("failed to create vault client: %w", err)
+		}
+
+		// Set up the client struct for auth
+		vStore.client = vaultClient
+		vStore.auth = vaultClient.Auth()
+		vStore.logical = vaultClient.Logical()
+		vStore.token = vaultClient.AuthToken()
+
+		// Apply namespace if specified
+		if vaultSpec.Namespace != nil {
+			vaultClient.SetNamespace(*vaultSpec.Namespace)
+		}
+
+		// Apply headers if specified
+		if vaultSpec.Headers != nil {
+			for hKey, hValue := range vaultSpec.Headers {
+				vaultClient.AddHeader(hKey, hValue)
+			}
+		}
+
+		// Apply read-your-writes header if needed
+		if vaultSpec.ReadYourWrites && vaultSpec.ForwardInconsistent {
+			vaultClient.AddHeader("X-Vault-Inconsistent", "forward-active-node")
+		}
+
+		// Perform authentication
+		metadata, err := vStore.setAuth(ctx, cfg)
+		if err != nil {
+			return nil, time.Time{}, false, fmt.Errorf("authentication failed: %w", err)
+		}
+
+		// Return client with metadata
+		if metadata != nil {
+			return vaultClient, metadata.Expiry, metadata.Renewable, nil
+		}
+
+		// Default metadata if not available (e.g., for token reuse)
+		return vaultClient, time.Now().Add(1 * time.Hour), false, nil
+	})
 }
 
 func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube kclient.Client, corev1 typedcorev1.CoreV1Interface, namespace string) (esv1.SecretsClient, error) {
@@ -140,7 +229,7 @@ func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube 
 		return nil, err
 	}
 
-	client, err := getVaultClient(p, store, cfg, namespace)
+	client, err := getVaultClient(ctx, p, vStore, store, cfg, namespace)
 	if err != nil {
 		return nil, fmt.Errorf(errVaultClient, err)
 	}
@@ -173,9 +262,12 @@ func (p *Provider) initClient(ctx context.Context, c *client, client util.Client
 	if c.storeKind == esv1.ClusterSecretStoreKind && c.namespace == "" && isReferentSpec(vaultSpec) {
 		return c, nil
 	}
-	if err := c.setAuth(ctx, cfg); err != nil {
+	metadata, err := c.setAuth(ctx, cfg)
+	if err != nil {
 		return nil, err
 	}
+	// metadata will be used in Phase 3 for cache integration
+	_ = metadata
 
 	return c, nil
 }
@@ -217,39 +309,336 @@ func (p *Provider) prepareConfig(ctx context.Context, kube kclient.Client, corev
 	return c, cfg, nil
 }
 
-func getVaultClient(p *Provider, store esv1.GenericStore, cfg *vault.Config, namespace string) (util.Client, error) {
-	vaultProvider := store.GetSpec().Provider.Vault
-	auth := vaultProvider.Auth
-	isStaticToken := auth != nil && auth.TokenSecretRef != nil
-	useCache := enableCache && !isStaticToken
-
-	keyNamespace := store.GetObjectMeta().Namespace
-	// A single ClusterSecretStore may need to spawn separate vault clients for each namespace.
-	if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && namespace != "" && isReferentSpec(vaultProvider) {
-		keyNamespace = namespace
+// buildClientConfig constructs a ClientConfig from store specifications for caching.
+func buildClientConfig(
+	ctx context.Context,
+	store esv1.GenericStore,
+	vaultSpec *esv1.VaultProvider,
+	namespace string,
+) (*vaultcache.ClientConfig, error) {
+	config := &vaultcache.ClientConfig{
+		VaultAddr:  vaultSpec.Server,
+		AuthMethod: determineAuthMethod(vaultSpec.Auth),
+		AuthParams: make(map[string]interface{}),
+		Headers:    make(map[string]string),
 	}
 
-	key := cache.Key{
-		Name:      store.GetObjectMeta().Name,
-		Namespace: keyNamespace,
-		Kind:      store.GetTypeMeta().Kind,
+	// Namespace
+	if vaultSpec.Namespace != nil {
+		config.Namespace = *vaultSpec.Namespace
 	}
-	if useCache {
-		client, ok := clientCache.Get(store.GetObjectMeta().ResourceVersion, key)
-		if ok {
-			return client, nil
+
+	// Headers
+	if vaultSpec.Headers != nil {
+		for k, v := range vaultSpec.Headers {
+			config.Headers[k] = v
 		}
 	}
 
-	client, err := p.NewVaultClient(cfg)
-	if err != nil {
-		return nil, fmt.Errorf(errVaultClient, err)
+	// Read-your-writes headers
+	config.ReadYourWrites = vaultSpec.ReadYourWrites
+	config.ForwardInconsistent = vaultSpec.ForwardInconsistent
+
+	// Auth context for invalidation
+	config.AuthContext = buildAuthContext(vaultSpec, namespace, store.GetTypeMeta().Kind)
+
+	// Auth params (method-specific, extract from vaultSpec.Auth)
+	config.AuthParams = extractAuthParams(vaultSpec.Auth)
+
+	// TLS config hashes
+	if len(vaultSpec.CABundle) > 0 {
+		config.TLSConfig = &vaultcache.TLSConfig{
+			CABundle:   vaultSpec.CABundle,
+			CACertHash: computeHash(vaultSpec.CABundle),
+		}
 	}
 
-	if useCache && !clientCache.Contains(key) {
-		clientCache.Add(store.GetObjectMeta().ResourceVersion, key, client)
+	// Note: Client TLS cert/key hashing would require fetching secrets here,
+	// which is not ideal. For now, we rely on other cache key components.
+	// In a future enhancement, we could add cert fingerprints to the auth context.
+
+	return config, nil
+}
+
+// determineAuthMethod returns the auth method type from auth spec.
+func determineAuthMethod(auth *esv1.VaultAuth) string {
+	if auth == nil {
+		return "none"
 	}
-	return client, nil
+	if auth.TokenSecretRef != nil {
+		return "token"
+	}
+	if auth.AppRole != nil {
+		return "approle"
+	}
+	if auth.Kubernetes != nil {
+		return "kubernetes"
+	}
+	if auth.Ldap != nil {
+		return "ldap"
+	}
+	if auth.UserPass != nil {
+		return "userpass"
+	}
+	if auth.Jwt != nil {
+		return "jwt"
+	}
+	if auth.Cert != nil {
+		return "cert"
+	}
+	if auth.Iam != nil {
+		return "iam"
+	}
+	return "unknown"
+}
+
+// buildAuthContext creates AuthContext for cache invalidation.
+func buildAuthContext(vaultSpec *esv1.VaultProvider, namespace, storeKind string) *vaultcache.AuthContext {
+	ctx := &vaultcache.AuthContext{
+		AuthMethod: determineAuthMethod(vaultSpec.Auth),
+		SecretRefs: []vaultcache.SecretReference{},
+	}
+
+	if vaultSpec.Auth == nil {
+		return ctx
+	}
+
+	// Extract secret references based on auth method
+	auth := vaultSpec.Auth
+
+	if auth.TokenSecretRef != nil {
+		ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+			Namespace: resolveNamespace(auth.TokenSecretRef.Namespace, namespace, storeKind),
+			Name:      auth.TokenSecretRef.Name,
+		})
+	}
+
+	if auth.AppRole != nil && auth.AppRole.SecretRef.Namespace != nil {
+		ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+			Namespace: *auth.AppRole.SecretRef.Namespace,
+			Name:      auth.AppRole.SecretRef.Name,
+		})
+	}
+
+	if auth.Kubernetes != nil {
+		if auth.Kubernetes.SecretRef != nil {
+			ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+				Namespace: resolveNamespace(auth.Kubernetes.SecretRef.Namespace, namespace, storeKind),
+				Name:      auth.Kubernetes.SecretRef.Name,
+			})
+		}
+		if auth.Kubernetes.ServiceAccountRef != nil {
+			ctx.ServiceAccountRef = &vaultcache.ServiceAccountReference{
+				Namespace: resolveNamespace(auth.Kubernetes.ServiceAccountRef.Namespace, namespace, storeKind),
+				Name:      auth.Kubernetes.ServiceAccountRef.Name,
+			}
+		}
+	}
+
+	if auth.Ldap != nil && auth.Ldap.SecretRef.Namespace != nil {
+		ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+			Namespace: *auth.Ldap.SecretRef.Namespace,
+			Name:      auth.Ldap.SecretRef.Name,
+		})
+	}
+
+	if auth.UserPass != nil && auth.UserPass.SecretRef.Namespace != nil {
+		ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+			Namespace: *auth.UserPass.SecretRef.Namespace,
+			Name:      auth.UserPass.SecretRef.Name,
+		})
+	}
+
+	if auth.Jwt != nil && auth.Jwt.SecretRef != nil && auth.Jwt.SecretRef.Namespace != nil {
+		ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+			Namespace: *auth.Jwt.SecretRef.Namespace,
+			Name:      auth.Jwt.SecretRef.Name,
+		})
+	}
+
+	if auth.Jwt != nil && auth.Jwt.KubernetesServiceAccountToken != nil {
+		saRef := auth.Jwt.KubernetesServiceAccountToken.ServiceAccountRef
+		ctx.ServiceAccountRef = &vaultcache.ServiceAccountReference{
+			Namespace: resolveNamespace(saRef.Namespace, namespace, storeKind),
+			Name:      saRef.Name,
+		}
+	}
+
+	if auth.Cert != nil && auth.Cert.SecretRef.Namespace != nil {
+		ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+			Namespace: *auth.Cert.SecretRef.Namespace,
+			Name:      auth.Cert.SecretRef.Name,
+		})
+	}
+
+	if auth.Iam != nil {
+		if auth.Iam.JWTAuth != nil && auth.Iam.JWTAuth.ServiceAccountRef != nil {
+			ctx.ServiceAccountRef = &vaultcache.ServiceAccountReference{
+				Namespace: resolveNamespace(auth.Iam.JWTAuth.ServiceAccountRef.Namespace, namespace, storeKind),
+				Name:      auth.Iam.JWTAuth.ServiceAccountRef.Name,
+			}
+		}
+		if auth.Iam.SecretRef != nil {
+			if auth.Iam.SecretRef.AccessKeyID.Namespace != nil {
+				ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+					Namespace: *auth.Iam.SecretRef.AccessKeyID.Namespace,
+					Name:      auth.Iam.SecretRef.AccessKeyID.Name,
+				})
+			}
+			if auth.Iam.SecretRef.SecretAccessKey.Namespace != nil {
+				ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+					Namespace: *auth.Iam.SecretRef.SecretAccessKey.Namespace,
+					Name:      auth.Iam.SecretRef.SecretAccessKey.Name,
+				})
+			}
+			if auth.Iam.SecretRef.SessionToken != nil && auth.Iam.SecretRef.SessionToken.Namespace != nil {
+				ctx.SecretRefs = append(ctx.SecretRefs, vaultcache.SecretReference{
+					Namespace: *auth.Iam.SecretRef.SessionToken.Namespace,
+					Name:      auth.Iam.SecretRef.SessionToken.Name,
+				})
+			}
+		}
+	}
+
+	return ctx
+}
+
+// extractAuthParams extracts auth-specific parameters for cache key generation.
+func extractAuthParams(auth *esv1.VaultAuth) map[string]interface{} {
+	params := make(map[string]interface{})
+	if auth == nil {
+		return params
+	}
+
+	// Add relevant auth params that affect authentication
+	if auth.Kubernetes != nil {
+		params["role"] = auth.Kubernetes.Role
+		params["path"] = auth.Kubernetes.Path
+	}
+	if auth.AppRole != nil {
+		params["path"] = auth.AppRole.Path
+		if auth.AppRole.RoleID != "" {
+			params["roleId"] = auth.AppRole.RoleID
+		}
+	}
+	if auth.Ldap != nil {
+		params["path"] = auth.Ldap.Path
+		params["username"] = auth.Ldap.Username
+	}
+	if auth.UserPass != nil {
+		params["path"] = auth.UserPass.Path
+		params["username"] = auth.UserPass.Username
+	}
+	if auth.Jwt != nil {
+		params["path"] = auth.Jwt.Path
+		params["role"] = auth.Jwt.Role
+	}
+	if auth.Cert != nil {
+		// Cert auth doesn't have path or role fields in the API
+		params["auth_method"] = "cert"
+	}
+	if auth.Iam != nil {
+		params["path"] = auth.Iam.Path
+		params["role"] = auth.Iam.Role
+		if auth.Iam.Region != "" {
+			params["region"] = auth.Iam.Region
+		}
+	}
+
+	return params
+}
+
+// resolveNamespace resolves namespace for secret refs.
+func resolveNamespace(ref *string, defaultNS, storeKind string) string {
+	if ref != nil {
+		return *ref
+	}
+	// For ClusterSecretStore, use the provided namespace
+	// For SecretStore, use the store's namespace
+	return defaultNS
+}
+
+// computeHash computes SHA256 hash of data.
+func computeHash(data []byte) string {
+	h := sha256.New()
+	h.Write(data)
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// getVaultClient retrieves or creates an authenticated Vault client using the ClientManager.
+func getVaultClient(
+	ctx context.Context,
+	p *Provider,
+	vStore *client,
+	store esv1.GenericStore,
+	cfg *vault.Config,
+	namespace string,
+) (util.Client, error) {
+	vaultSpec := store.GetSpec().Provider.Vault
+	auth := vaultSpec.Auth
+	isStaticToken := auth != nil && auth.TokenSecretRef != nil
+
+	// Static tokens bypass cache - create client directly
+	if isStaticToken || clientManager == nil {
+		client, err := p.NewVaultClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf(errVaultClient, err)
+		}
+		return client, nil
+	}
+
+	// Build cache configuration
+	clientConfig, err := buildClientConfig(ctx, store, vaultSpec, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build client config: %w", err)
+	}
+
+	// Create client via cache (with singleflight + renewal)
+	return clientManager.GetClient(ctx, *clientConfig, func() (util.Client, time.Time, bool, error) {
+		// This function is only called on cache miss
+		// Create new client
+		vaultClient, err := p.NewVaultClient(cfg)
+		if err != nil {
+			return nil, time.Time{}, false, fmt.Errorf("failed to create vault client: %w", err)
+		}
+
+		// Set up the client struct for auth
+		vStore.client = vaultClient
+		vStore.auth = vaultClient.Auth()
+		vStore.logical = vaultClient.Logical()
+		vStore.token = vaultClient.AuthToken()
+
+		// Apply namespace if specified
+		if vaultSpec.Namespace != nil {
+			vaultClient.SetNamespace(*vaultSpec.Namespace)
+		}
+
+		// Apply headers if specified
+		if vaultSpec.Headers != nil {
+			for hKey, hValue := range vaultSpec.Headers {
+				vaultClient.AddHeader(hKey, hValue)
+			}
+		}
+
+		// Apply read-your-writes header if needed
+		if vaultSpec.ReadYourWrites && vaultSpec.ForwardInconsistent {
+			vaultClient.AddHeader("X-Vault-Inconsistent", "forward-active-node")
+		}
+
+		// Perform authentication
+		metadata, err := vStore.setAuth(ctx, cfg)
+		if err != nil {
+			return nil, time.Time{}, false, fmt.Errorf("authentication failed: %w", err)
+		}
+
+		// Return client with metadata
+		if metadata != nil {
+			return vaultClient, metadata.Expiry, metadata.Renewable, nil
+		}
+
+		// Default metadata if not available (e.g., for token reuse)
+		return vaultClient, time.Now().Add(1 * time.Hour), false, nil
+	})
 }
 
 func isReferentSpec(prov *esv1.VaultProvider) bool {
@@ -296,13 +685,12 @@ func isReferentSpec(prov *esv1.VaultProvider) bool {
 	return false
 }
 
-func initCache(size int) {
-	logger.Info("initializing vault cache", "size", size)
-	clientCache = cache.Must(size, func(client util.Client) {
-		err := revokeTokenIfValid(context.Background(), client)
-		if err != nil {
-			logger.Error(err, "unable to revoke cached token on eviction")
-		}
+func initClientManager(size int) {
+	logger.Info("initializing vault client manager", "size", size, "renewal_window", "5m")
+	clientManager = vaultcache.NewClientManager(vaultcache.CacheConfig{
+		Size:          size,
+		RenewalWindow: 5 * time.Minute,
+		EnableMetrics: true,
 	})
 }
 
@@ -313,8 +701,12 @@ func init() {
 	// max. 265k vault leases with 30bytes each ~= 7MB
 	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize, "Maximum size of Vault token cache. When more tokens than Only used if --experimental-enable-vault-token-cache is set.")
 	feature.Register(feature.Feature{
-		Flags:      fs,
-		Initialize: func() { initCache(vaultTokenCacheSize) },
+		Flags: fs,
+		Initialize: func() {
+			if enableCache {
+				initClientManager(vaultTokenCacheSize)
+			}
+		},
 	})
 
 	esv1.Register(&Provider{

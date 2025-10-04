@@ -33,19 +33,19 @@ const (
 	errInvalidAppRoleID = "invalid Auth.AppRole: neither `roleId` nor `roleRef` was supplied"
 )
 
-func setAppRoleToken(ctx context.Context, v *client) (bool, error) {
+func setAppRoleToken(ctx context.Context, v *client) (bool, *TokenMetadata, error) {
 	appRole := v.store.Auth.AppRole
 	if appRole != nil {
-		err := v.requestTokenWithAppRoleRef(ctx, appRole)
+		metadata, err := v.requestTokenWithAppRoleRef(ctx, appRole)
 		if err != nil {
-			return true, err
+			return true, nil, err
 		}
-		return true, nil
+		return true, metadata, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (c *client) requestTokenWithAppRoleRef(ctx context.Context, appRole *esv1.VaultAppRole) error {
+func (c *client) requestTokenWithAppRoleRef(ctx context.Context, appRole *esv1.VaultAppRole) (*TokenMetadata, error) {
 	var err error
 	var roleID string // becomes the RoleID used to authenticate with HashiCorp Vault
 
@@ -55,25 +55,27 @@ func (c *client) requestTokenWithAppRoleRef(ctx context.Context, appRole *esv1.V
 	} else if appRole.RoleRef != nil { // use RoleID from Secret, if configured
 		roleID, err = resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, appRole.RoleRef)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else { // we ran out of ways to get RoleID. return an appropriate error
-		return errors.New(errInvalidAppRoleID)
+		return nil, errors.New(errInvalidAppRoleID)
 	}
 
 	secretID, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &appRole.SecretRef)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	secret := approle.SecretID{FromString: secretID}
 	appRoleClient, err := approle.NewAppRoleAuth(roleID, &secret, approle.WithMountPath(appRole.Path))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = c.auth.Login(ctx, appRoleClient)
+	authSecret, err := c.auth.Login(ctx, appRoleClient)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	// Extract and return metadata
+	return extractTokenMetadata(authSecret), nil
 }
