@@ -42,6 +42,7 @@ var (
 	enableCache bool
 	logger      = ctrl.Log.WithName("provider").WithName("vault")
 	clientCache *cache.Cache[util.Client]
+	globalPool  ClientPool
 )
 
 const (
@@ -60,6 +61,9 @@ type Provider struct {
 	// NewVaultClient is a function that returns a new Vault client.
 	// This is used for testing to inject a fake client.
 	NewVaultClient func(config *vault.Config) (util.Client, error)
+
+	// pool manages the lifecycle of Vault clients
+	pool ClientPool
 }
 
 // NewVaultClient returns a new Vault client.
@@ -140,6 +144,35 @@ func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube 
 		return nil, err
 	}
 
+	// Use the client pool to acquire a client
+	if p.pool != nil {
+		poolConfig := VaultClientConfig{
+			VaultConfig:    cfg,
+			VaultSpec:      vaultSpec,
+			Kubernetes:     kube,
+			CoreV1:         corev1,
+			CredentialNS:   namespace,
+			StoreKind:      store.GetObjectKind().GroupVersionKind().Kind,
+			StoreName:      store.GetObjectMeta().Name,
+			StoreNamespace: store.GetObjectMeta().Namespace,
+		}
+
+		lease, err := p.pool.Acquire(ctx, poolConfig)
+		if err != nil {
+			return nil, fmt.Errorf(errVaultClient, err)
+		}
+
+		// Set the client fields from the lease
+		vStore.client = lease.Client()
+		vStore.auth = vStore.client.Auth()
+		vStore.logical = vStore.client.Logical()
+		vStore.token = vStore.client.AuthToken()
+		vStore.lease = lease
+
+		return vStore, nil
+	}
+
+	// Fallback to old behavior if pool is not initialized
 	client, err := getVaultClient(p, store, cfg, namespace)
 	if err != nil {
 		return nil, fmt.Errorf(errVaultClient, err)
@@ -306,6 +339,19 @@ func initCache(size int) {
 	})
 }
 
+func initPool(size int) {
+	if enableCache {
+		logger.Info("initializing vault client pool", "size", size)
+		globalPool = NewCachingPool(PoolConfig{
+			MaxSize: size,
+			Logger:  logger,
+		})
+	} else {
+		logger.Info("initializing vault no-op pool (caching disabled)")
+		globalPool = NewNoOpPool()
+	}
+}
+
 func init() {
 	var vaultTokenCacheSize int
 	fs := pflag.NewFlagSet("vault", pflag.ExitOnError)
@@ -313,12 +359,16 @@ func init() {
 	// max. 265k vault leases with 30bytes each ~= 7MB
 	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize, "Maximum size of Vault token cache. When more tokens than Only used if --experimental-enable-vault-token-cache is set.")
 	feature.Register(feature.Feature{
-		Flags:      fs,
-		Initialize: func() { initCache(vaultTokenCacheSize) },
+		Flags: fs,
+		Initialize: func() {
+			initCache(vaultTokenCacheSize)
+			initPool(vaultTokenCacheSize)
+		},
 	})
 
 	esv1.Register(&Provider{
 		NewVaultClient: NewVaultClient,
+		pool:           globalPool,
 	}, &esv1.SecretStoreProvider{
 		Vault: &esv1.VaultProvider{},
 	}, esv1.MaintenanceStatusMaintained)
