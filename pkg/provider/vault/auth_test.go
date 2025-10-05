@@ -198,7 +198,7 @@ func TestCheckTokenErrors(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			token := fake.Token{
+			token := &fake.Token{
 				LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
 					return tc.secret, tc.err
 				},
@@ -266,7 +266,7 @@ func TestCheckTokenTtl(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			token := fake.Token{
+			token := &fake.Token{
 				LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
 					return tc.secret, nil
 				},

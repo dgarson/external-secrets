@@ -32,6 +32,7 @@ type Auth interface {
 type Token interface {
 	RevokeSelfWithContext(ctx context.Context, token string) error
 	LookupSelfWithContext(ctx context.Context) (*vault.Secret, error)
+	RenewSelfWithContext(ctx context.Context, increment int) (*vault.Secret, error)
 }
 
 type Logical interface {

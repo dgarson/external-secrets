@@ -159,17 +159,93 @@ func (f Logical) WriteWithContext(ctx context.Context, path string, data map[str
 
 type RevokeSelfWithContextFn func(ctx context.Context, token string) error
 type LookupSelfWithContextFn func(ctx context.Context) (*vault.Secret, error)
+type RenewSelfWithContextFn func(ctx context.Context, increment int) (*vault.Secret, error)
 
 type Token struct {
 	RevokeSelfWithContextFn RevokeSelfWithContextFn
 	LookupSelfWithContextFn LookupSelfWithContextFn
+	RenewSelfWithContextFn  RenewSelfWithContextFn
+
+	// Test tracking fields
+	mu            sync.Mutex
+	revokeCalls   int
+	renewCalls    int
+	revokedTokens map[string]bool
+	tokenValid    bool
 }
 
-func (f Token) RevokeSelfWithContext(ctx context.Context, token string) error {
-	return f.RevokeSelfWithContextFn(ctx, token)
+func (f *Token) RevokeSelfWithContext(ctx context.Context, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokeCalls++
+	if f.revokedTokens == nil {
+		f.revokedTokens = make(map[string]bool)
+	}
+	f.revokedTokens[token] = true
+	f.tokenValid = false
+
+	if f.RevokeSelfWithContextFn != nil {
+		return f.RevokeSelfWithContextFn(ctx, token)
+	}
+	return nil
 }
-func (f Token) LookupSelfWithContext(ctx context.Context) (*vault.Secret, error) {
-	return f.LookupSelfWithContextFn(ctx)
+
+func (f *Token) LookupSelfWithContext(ctx context.Context) (*vault.Secret, error) {
+	if f.LookupSelfWithContextFn != nil {
+		return f.LookupSelfWithContextFn(ctx)
+	}
+	return &vault.Secret{}, nil
+}
+
+func (f *Token) RenewSelfWithContext(ctx context.Context, increment int) (*vault.Secret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renewCalls++
+
+	if f.RenewSelfWithContextFn != nil {
+		return f.RenewSelfWithContextFn(ctx, increment)
+	}
+	return &vault.Secret{}, nil
+}
+
+// GetRevokeCalls returns the number of token revocation calls made
+func (f *Token) GetRevokeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revokeCalls
+}
+
+// GetRenewCalls returns the number of token renewal calls made
+func (f *Token) GetRenewCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.renewCalls
+}
+
+// IsTokenRevoked checks if a specific token was revoked
+func (f *Token) IsTokenRevoked(token string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokedTokens == nil {
+		return false
+	}
+	return f.revokedTokens[token]
+}
+
+// IsTokenValid returns whether the token is currently valid
+func (f *Token) IsTokenValid() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokenValid
+}
+
+// ResetCalls resets all call counters
+func (f *Token) ResetCalls() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokeCalls = 0
+	f.renewCalls = 0
+	f.revokedTokens = make(map[string]bool)
 }
 
 type MockSetTokenFn func(v string)
@@ -189,10 +265,45 @@ type VaultListResponse struct {
 	Data     *vault.Response
 }
 
-func NewAuthTokenFn() Token {
-	return Token{nil, func(ctx context.Context) (*vault.Secret, error) {
-		return &(vault.Secret{}), nil
-	}}
+func NewAuthTokenFn() *Token {
+	t := &Token{
+		RevokeSelfWithContextFn: nil,
+		LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
+			return &(vault.Secret{}), nil
+		},
+		RenewSelfWithContextFn: nil,
+		tokenValid:             true,
+	}
+	return t
+}
+
+// NewAuthTokenFnWithTTL creates a Token with configurable TTL and renewability
+func NewAuthTokenFnWithTTL(ttl int, renewable bool) *Token {
+	t := &Token{
+		RevokeSelfWithContextFn: nil,
+		LookupSelfWithContextFn: func(ctx context.Context) (*vault.Secret, error) {
+			return &vault.Secret{
+				Auth: &vault.SecretAuth{
+					LeaseDuration: ttl,
+					Renewable:     renewable,
+				},
+				Data: map[string]interface{}{
+					"ttl":       ttl,
+					"renewable": renewable,
+				},
+			}, nil
+		},
+		RenewSelfWithContextFn: func(ctx context.Context, increment int) (*vault.Secret, error) {
+			return &vault.Secret{
+				Auth: &vault.SecretAuth{
+					LeaseDuration: ttl,
+					Renewable:     renewable,
+				},
+			}, nil
+		},
+		tokenValid: true,
+	}
+	return t
 }
 
 func NewSetTokenFn(ofn ...func(v string)) MockSetTokenFn {
@@ -224,7 +335,7 @@ func NewAddHeaderFn() MockAddHeaderFn {
 type VaultClient struct {
 	MockLogical      Logical
 	MockAuth         Auth
-	MockAuthToken    Token
+	MockAuthToken    *Token
 	MockSetToken     MockSetTokenFn
 	MockToken        MockTokenFn
 	MockClearToken   MockClearTokenFn
@@ -232,8 +343,63 @@ type VaultClient struct {
 	MockSetNamespace MockSetNamespaceFn
 	MockAddHeader    MockAddHeaderFn
 
-	namespace string
-	lock      sync.RWMutex
+	namespace       string
+	lock            sync.RWMutex
+	authAttempts    int
+	authAttemptsMu  sync.Mutex
+	simulateUnavail bool
+	unavailMu       sync.Mutex
+	currentToken    string
+	tokenMu         sync.Mutex
+}
+
+// GetAuthAttempts returns the number of authentication attempts
+func (c *VaultClient) GetAuthAttempts() int {
+	c.authAttemptsMu.Lock()
+	defer c.authAttemptsMu.Unlock()
+	return c.authAttempts
+}
+
+// IncrementAuthAttempts increments the authentication attempt counter
+func (c *VaultClient) IncrementAuthAttempts() {
+	c.authAttemptsMu.Lock()
+	defer c.authAttemptsMu.Unlock()
+	c.authAttempts++
+}
+
+// ResetAuthAttempts resets the authentication attempt counter
+func (c *VaultClient) ResetAuthAttempts() {
+	c.authAttemptsMu.Lock()
+	defer c.authAttemptsMu.Unlock()
+	c.authAttempts = 0
+}
+
+// SetSimulateUnavailable simulates Vault being unavailable
+func (c *VaultClient) SetSimulateUnavailable(unavail bool) {
+	c.unavailMu.Lock()
+	defer c.unavailMu.Unlock()
+	c.simulateUnavail = unavail
+}
+
+// IsSimulatingUnavailable returns whether Vault unavailability is being simulated
+func (c *VaultClient) IsSimulatingUnavailable() bool {
+	c.unavailMu.Lock()
+	defer c.unavailMu.Unlock()
+	return c.simulateUnavail
+}
+
+// GetCurrentToken returns the currently set token
+func (c *VaultClient) GetCurrentToken() string {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	return c.currentToken
+}
+
+// SetCurrentToken sets the current token
+func (c *VaultClient) SetCurrentToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.currentToken = token
 }
 
 func (c *VaultClient) Logical() Logical {
@@ -266,7 +432,7 @@ func NewVaultAuth() Auth {
 	}
 	return auth
 }
-func (c *VaultClient) AuthToken() Token {
+func (c *VaultClient) AuthToken() *Token {
 	return c.MockAuthToken
 }
 

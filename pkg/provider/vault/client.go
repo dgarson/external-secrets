@@ -49,6 +49,7 @@ type client struct {
 	token     util.Token
 	namespace string
 	storeKind string
+	lease     ClientLease
 }
 
 func (c *client) newConfig(ctx context.Context) (*vault.Config, error) {
@@ -120,8 +121,13 @@ func (c *client) configureClientTLS(ctx context.Context, cfg *vault.Config) erro
 }
 
 func (c *client) Close(ctx context.Context) error {
-	// Revoke the token if we have one set, it wasn't sourced from a TokenSecretRef,
-	// and token caching isn't enabled
+	// If using a lease, release it back to the pool
+	if c.lease != nil {
+		return c.lease.Release()
+	}
+
+	// Fallback to old behavior for backward compatibility
+	// (this path shouldn't be reached in normal operation)
 	if !enableCache && c.client.Token() != "" && c.store.Auth != nil && c.store.Auth.TokenSecretRef == nil {
 		err := revokeTokenIfValid(ctx, c.client)
 		if err != nil {

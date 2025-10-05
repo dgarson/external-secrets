@@ -1,0 +1,477 @@
+=== RUN   TestSetAuthNamespace
+=== RUN   TestSetAuthNamespace/StoreWithDistinctNamespace
+=== RUN   TestSetAuthNamespace/StoreNoNamespace
+=== RUN   TestSetAuthNamespace/StoreWithNamespace
+=== RUN   TestSetAuthNamespace/StoreWithAuthNamespace
+=== RUN   TestSetAuthNamespace/StoreWithSameNamespace
+--- PASS: TestSetAuthNamespace (0.04s)
+    --- PASS: TestSetAuthNamespace/StoreWithDistinctNamespace (0.00s)
+    --- PASS: TestSetAuthNamespace/StoreNoNamespace (0.00s)
+    --- PASS: TestSetAuthNamespace/StoreWithNamespace (0.00s)
+    --- PASS: TestSetAuthNamespace/StoreWithAuthNamespace (0.00s)
+    --- PASS: TestSetAuthNamespace/StoreWithSameNamespace (0.00s)
+=== RUN   TestCheckTokenErrors
+=== RUN   TestCheckTokenErrors/SuccessWithNoData
+=== RUN   TestCheckTokenErrors/Error
+=== RUN   TestCheckTokenErrors/NoDataNorError
+--- PASS: TestCheckTokenErrors (0.00s)
+    --- PASS: TestCheckTokenErrors/SuccessWithNoData (0.00s)
+    --- PASS: TestCheckTokenErrors/Error (0.00s)
+    --- PASS: TestCheckTokenErrors/NoDataNorError (0.00s)
+=== RUN   TestCheckTokenTtl
+=== RUN   TestCheckTokenTtl/LongTTLExpirable
+=== RUN   TestCheckTokenTtl/ShortTTLExpirable
+=== RUN   TestCheckTokenTtl/ZeroTTLExpirable
+=== RUN   TestCheckTokenTtl/NonExpirable
+--- PASS: TestCheckTokenTtl (0.00s)
+    --- PASS: TestCheckTokenTtl/LongTTLExpirable (0.00s)
+    --- PASS: TestCheckTokenTtl/ShortTTLExpirable (0.00s)
+    --- PASS: TestCheckTokenTtl/ZeroTTLExpirable (0.00s)
+    --- PASS: TestCheckTokenTtl/NonExpirable (0.00s)
+=== RUN   TestGetAllSecrets
+=== RUN   TestGetAllSecrets/FindByNameKv1
+=== RUN   TestGetAllSecrets/FindByTagKv2
+=== RUN   TestGetAllSecrets/FilterByPathKv2WithTags
+=== RUN   TestGetAllSecrets/FilterByPathReturnsNotFound
+=== RUN   TestGetAllSecrets/FilterByPathKv1
+=== RUN   TestGetAllSecrets/MetadataNotFound
+=== RUN   TestGetAllSecrets/FindByNameKv2
+=== RUN   TestGetAllSecrets/FindByTagKv1
+=== RUN   TestGetAllSecrets/FilterByPathKv2WithoutTags
+--- PASS: TestGetAllSecrets (0.00s)
+    --- PASS: TestGetAllSecrets/FindByNameKv1 (0.00s)
+    --- PASS: TestGetAllSecrets/FindByTagKv2 (0.00s)
+    --- PASS: TestGetAllSecrets/FilterByPathKv2WithTags (0.00s)
+    --- PASS: TestGetAllSecrets/FilterByPathReturnsNotFound (0.00s)
+    --- PASS: TestGetAllSecrets/FilterByPathKv1 (0.00s)
+    --- PASS: TestGetAllSecrets/MetadataNotFound (0.00s)
+    --- PASS: TestGetAllSecrets/FindByNameKv2 (0.00s)
+    --- PASS: TestGetAllSecrets/FindByTagKv1 (0.00s)
+    --- PASS: TestGetAllSecrets/FilterByPathKv2WithoutTags (0.00s)
+=== RUN   TestGetSecret
+=== RUN   TestGetSecret/ReadSecretWithNil
+=== RUN   TestGetSecret/ReadSecretWithJsonNumber
+=== RUN   TestGetSecret/FailReadSecretMetadataNoMetadata
+=== RUN   TestGetSecret/ReadSecretWithNestedValue
+=== RUN   TestGetSecret/ReadSecretWithMissingValueFromData
+=== RUN   TestGetSecret/ReadSecretNotFound
+=== RUN   TestGetSecret/FailReadSecretMetadataInvalidProperty
+=== RUN   TestGetSecret/FailReadSecretMetadataWrongVersion
+=== RUN   TestGetSecret/ReadSecret
+=== RUN   TestGetSecret/ReadSecretWithSliceValue
+=== RUN   TestGetSecret/ReadSecretMetadataWithProperty
+=== RUN   TestGetSecret/ReadSecretWithoutProperty
+=== RUN   TestGetSecret/ReadSecretWithNestedValueFromData
+=== RUN   TestGetSecret/NonexistentProperty
+=== RUN   TestGetSecret/ReadSecretError
+=== RUN   TestGetSecret/ReadSecretMetadataWithoutProperty
+--- PASS: TestGetSecret (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithNil (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithJsonNumber (0.00s)
+    --- PASS: TestGetSecret/FailReadSecretMetadataNoMetadata (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithNestedValue (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithMissingValueFromData (0.00s)
+    --- PASS: TestGetSecret/ReadSecretNotFound (0.00s)
+    --- PASS: TestGetSecret/FailReadSecretMetadataInvalidProperty (0.00s)
+    --- PASS: TestGetSecret/FailReadSecretMetadataWrongVersion (0.00s)
+    --- PASS: TestGetSecret/ReadSecret (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithSliceValue (0.00s)
+    --- PASS: TestGetSecret/ReadSecretMetadataWithProperty (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithoutProperty (0.00s)
+    --- PASS: TestGetSecret/ReadSecretWithNestedValueFromData (0.00s)
+    --- PASS: TestGetSecret/NonexistentProperty (0.00s)
+    --- PASS: TestGetSecret/ReadSecretError (0.00s)
+    --- PASS: TestGetSecret/ReadSecretMetadataWithoutProperty (0.00s)
+=== RUN   TestGetSecretMap
+=== RUN   TestGetSecretMap/ReadSecretKV2
+=== RUN   TestGetSecretMap/ReadSecretWithSpecialCharactersKV1
+=== RUN   TestGetSecretMap/ReadSecretWithNilValueKV1
+=== RUN   TestGetSecretMap/ReadSecretWithNilValueKV2
+=== RUN   TestGetSecretMap/ReadSecretKV1
+=== RUN   TestGetSecretMap/ReadSecretWithSpecialCharactersKV2
+=== RUN   TestGetSecretMap/ReadSecretWithTypesKV2
+=== RUN   TestGetSecretMap/ReadNestedSecret
+=== RUN   TestGetSecretMap/ReadDeeplyNestedSecret
+=== RUN   TestGetSecretMap/ReadSecretError
+--- PASS: TestGetSecretMap (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretKV2 (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretWithSpecialCharactersKV1 (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretWithNilValueKV1 (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretWithNilValueKV2 (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretKV1 (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretWithSpecialCharactersKV2 (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretWithTypesKV2 (0.00s)
+    --- PASS: TestGetSecretMap/ReadNestedSecret (0.00s)
+    --- PASS: TestGetSecretMap/ReadDeeplyNestedSecret (0.00s)
+    --- PASS: TestGetSecretMap/ReadSecretError (0.00s)
+=== RUN   TestGetSecretPath
+=== RUN   TestGetSecretPath/PathWithoutFormatV2
+=== RUN   TestGetSecretPath/PathWithoutFormatV2_NoData
+=== RUN   TestGetSecretPath/PathWithoutFormatV2_NoPath
+=== RUN   TestGetSecretPath/PathWithoutFormatV2_NoPathWithData
+=== RUN   TestGetSecretPath/PathWithoutFormatV1
+=== RUN   TestGetSecretPath/PathWithoutFormatV1_NoPath
+=== RUN   TestGetSecretPath/WithoutPathButMountpointV2
+=== RUN   TestGetSecretPath/WithoutPathButMountpointV1
+--- PASS: TestGetSecretPath (0.00s)
+    --- PASS: TestGetSecretPath/PathWithoutFormatV2 (0.00s)
+    --- PASS: TestGetSecretPath/PathWithoutFormatV2_NoData (0.00s)
+    --- PASS: TestGetSecretPath/PathWithoutFormatV2_NoPath (0.00s)
+    --- PASS: TestGetSecretPath/PathWithoutFormatV2_NoPathWithData (0.00s)
+    --- PASS: TestGetSecretPath/PathWithoutFormatV1 (0.00s)
+    --- PASS: TestGetSecretPath/PathWithoutFormatV1_NoPath (0.00s)
+    --- PASS: TestGetSecretPath/WithoutPathButMountpointV2 (0.00s)
+    --- PASS: TestGetSecretPath/WithoutPathButMountpointV1 (0.00s)
+=== RUN   TestGetSecretMetadataPath
+=== RUN   TestGetSecretMetadataPath/PathForV1
+=== RUN   TestGetSecretMetadataPath/PathForV2
+=== RUN   TestGetSecretMetadataPath/PathForV2WithData
+--- PASS: TestGetSecretMetadataPath (0.00s)
+    --- PASS: TestGetSecretMetadataPath/PathForV1 (0.00s)
+    --- PASS: TestGetSecretMetadataPath/PathForV2 (0.00s)
+    --- PASS: TestGetSecretMetadataPath/PathForV2WithData (0.00s)
+=== RUN   TestSecretExists
+=== RUN   TestSecretExists/NoExistingSecretV1
+=== RUN   TestSecretExists/NoExistingSecretWithPropertyV2
+=== RUN   TestSecretExists/NoExistingSecretWithPropertyV1
+=== RUN   TestSecretExists/ExistingSecretV1
+=== RUN   TestSecretExists/ErrorReadingSecretV1
+=== RUN   TestSecretExists/ErrorReadingSecretV2
+=== RUN   TestSecretExists/NoExistingSecretV2
+=== RUN   TestSecretExists/ExistingSecretV2
+=== RUN   TestSecretExists/ExistingSecretWithNilV1
+=== RUN   TestSecretExists/ExistingSecretWithNilV2
+--- PASS: TestSecretExists (0.00s)
+    --- PASS: TestSecretExists/NoExistingSecretV1 (0.00s)
+    --- PASS: TestSecretExists/NoExistingSecretWithPropertyV2 (0.00s)
+    --- PASS: TestSecretExists/NoExistingSecretWithPropertyV1 (0.00s)
+    --- PASS: TestSecretExists/ExistingSecretV1 (0.00s)
+    --- PASS: TestSecretExists/ErrorReadingSecretV1 (0.00s)
+    --- PASS: TestSecretExists/ErrorReadingSecretV2 (0.00s)
+    --- PASS: TestSecretExists/NoExistingSecretV2 (0.00s)
+    --- PASS: TestSecretExists/ExistingSecretV2 (0.00s)
+    --- PASS: TestSecretExists/ExistingSecretWithNilV1 (0.00s)
+    --- PASS: TestSecretExists/ExistingSecretWithNilV2 (0.00s)
+=== RUN   TestGoroutineLeak
+--- PASS: TestGoroutineLeak (0.51s)
+=== RUN   TestTimerCleanup
+--- PASS: TestTimerCleanup (0.20s)
+=== RUN   TestCacheEvictionMemory
+--- PASS: TestCacheEvictionMemory (0.21s)
+=== RUN   TestMemoryGrowthUnderLoad
+    client_pool_leak_test.go:157: memory grew by 18446744073709549440 bytes (may be acceptable depending on test environment)
+--- PASS: TestMemoryGrowthUnderLoad (0.51s)
+=== RUN   TestMultiplePoolLifecycles
+--- PASS: TestMultiplePoolLifecycles (1.35s)
+=== RUN   TestShutdownCompletesCleanup
+--- PASS: TestShutdownCompletesCleanup (0.15s)
+=== RUN   TestShutdownTimeout
+--- PASS: TestShutdownTimeout (0.00s)
+=== RUN   TestCacheKeyGeneration
+--- PASS: TestCacheKeyGeneration (0.00s)
+=== RUN   TestAuthErrorDetection
+=== RUN   TestAuthErrorDetection/nil_error
+=== RUN   TestAuthErrorDetection/401_response_error
+=== RUN   TestAuthErrorDetection/403_response_error
+=== RUN   TestAuthErrorDetection/404_response_error
+=== RUN   TestAuthErrorDetection/permission_denied_error
+=== RUN   TestAuthErrorDetection/unauthorized_error
+=== RUN   TestAuthErrorDetection/forbidden_error
+=== RUN   TestAuthErrorDetection/other_error
+--- PASS: TestAuthErrorDetection (0.00s)
+    --- PASS: TestAuthErrorDetection/nil_error (0.00s)
+    --- PASS: TestAuthErrorDetection/401_response_error (0.00s)
+    --- PASS: TestAuthErrorDetection/403_response_error (0.00s)
+    --- PASS: TestAuthErrorDetection/404_response_error (0.00s)
+    --- PASS: TestAuthErrorDetection/permission_denied_error (0.00s)
+    --- PASS: TestAuthErrorDetection/unauthorized_error (0.00s)
+    --- PASS: TestAuthErrorDetection/forbidden_error (0.00s)
+    --- PASS: TestAuthErrorDetection/other_error (0.00s)
+=== RUN   TestGetAuthMethod
+=== RUN   TestGetAuthMethod/no_auth
+=== RUN   TestGetAuthMethod/approle
+=== RUN   TestGetAuthMethod/kubernetes
+=== RUN   TestGetAuthMethod/ldap
+=== RUN   TestGetAuthMethod/jwt
+=== RUN   TestGetAuthMethod/cert
+=== RUN   TestGetAuthMethod/token
+=== RUN   TestGetAuthMethod/iam
+=== RUN   TestGetAuthMethod/userpass
+--- PASS: TestGetAuthMethod (0.00s)
+    --- PASS: TestGetAuthMethod/no_auth (0.00s)
+    --- PASS: TestGetAuthMethod/approle (0.00s)
+    --- PASS: TestGetAuthMethod/kubernetes (0.00s)
+    --- PASS: TestGetAuthMethod/ldap (0.00s)
+    --- PASS: TestGetAuthMethod/jwt (0.00s)
+    --- PASS: TestGetAuthMethod/cert (0.00s)
+    --- PASS: TestGetAuthMethod/token (0.00s)
+    --- PASS: TestGetAuthMethod/iam (0.00s)
+    --- PASS: TestGetAuthMethod/userpass (0.00s)
+=== RUN   TestIsStaticToken
+=== RUN   TestIsStaticToken/no_auth
+=== RUN   TestIsStaticToken/token_secret_ref
+=== RUN   TestIsStaticToken/approle
+--- PASS: TestIsStaticToken (0.00s)
+    --- PASS: TestIsStaticToken/no_auth (0.00s)
+    --- PASS: TestIsStaticToken/token_secret_ref (0.00s)
+    --- PASS: TestIsStaticToken/approle (0.00s)
+=== RUN   TestConcurrentAcquisition
+    client_pool_test.go:345: Got 0 errors from 10 goroutines (expected all to fail without proper mocks)
+--- PASS: TestConcurrentAcquisition (0.00s)
+=== RUN   TestCircuitBreaker
+--- PASS: TestCircuitBreaker (0.11s)
+=== RUN   TestBackgroundCleanup
+--- PASS: TestBackgroundCleanup (0.05s)
+=== RUN   TestMaxAge
+--- PASS: TestMaxAge (0.00s)
+=== RUN   TestMetrics
+--- PASS: TestMetrics (0.00s)
+=== RUN   TestPoolRaceConditions
+=== RUN   TestPoolRaceConditions/ConcurrentAcquisitionSameConfig
+=== PAUSE TestPoolRaceConditions/ConcurrentAcquisitionSameConfig
+=== RUN   TestPoolRaceConditions/ConcurrentAcquisitionDifferentConfigs
+=== PAUSE TestPoolRaceConditions/ConcurrentAcquisitionDifferentConfigs
+=== RUN   TestPoolRaceConditions/ConcurrentShutdown
+=== PAUSE TestPoolRaceConditions/ConcurrentShutdown
+=== CONT  TestPoolRaceConditions/ConcurrentAcquisitionSameConfig
+=== CONT  TestPoolRaceConditions/ConcurrentShutdown
+=== CONT  TestPoolRaceConditions/ConcurrentAcquisitionDifferentConfigs
+--- PASS: TestPoolRaceConditions (0.00s)
+    --- PASS: TestPoolRaceConditions/ConcurrentShutdown (0.00s)
+    --- PASS: TestPoolRaceConditions/ConcurrentAcquisitionDifferentConfigs (0.00s)
+    --- PASS: TestPoolRaceConditions/ConcurrentAcquisitionSameConfig (0.01s)
+=== RUN   TestTokenRenewalRaceConditions
+=== RUN   TestTokenRenewalRaceConditions/ConcurrentRenewalAndCleanup
+=== PAUSE TestTokenRenewalRaceConditions/ConcurrentRenewalAndCleanup
+=== CONT  TestTokenRenewalRaceConditions/ConcurrentRenewalAndCleanup
+--- PASS: TestTokenRenewalRaceConditions (0.00s)
+    --- PASS: TestTokenRenewalRaceConditions/ConcurrentRenewalAndCleanup (0.30s)
+=== RUN   TestCircuitBreakerRaceConditions
+=== RUN   TestCircuitBreakerRaceConditions/ConcurrentFailureRecording
+=== PAUSE TestCircuitBreakerRaceConditions/ConcurrentFailureRecording
+=== RUN   TestCircuitBreakerRaceConditions/ConcurrentCheckAndReset
+=== PAUSE TestCircuitBreakerRaceConditions/ConcurrentCheckAndReset
+=== RUN   TestCircuitBreakerRaceConditions/ConcurrentCircuitStateChanges
+=== PAUSE TestCircuitBreakerRaceConditions/ConcurrentCircuitStateChanges
+=== CONT  TestCircuitBreakerRaceConditions/ConcurrentFailureRecording
+=== CONT  TestCircuitBreakerRaceConditions/ConcurrentCircuitStateChanges
+=== CONT  TestCircuitBreakerRaceConditions/ConcurrentCheckAndReset
+--- PASS: TestCircuitBreakerRaceConditions (0.00s)
+    --- PASS: TestCircuitBreakerRaceConditions/ConcurrentCheckAndReset (0.00s)
+    --- PASS: TestCircuitBreakerRaceConditions/ConcurrentFailureRecording (0.00s)
+    --- PASS: TestCircuitBreakerRaceConditions/ConcurrentCircuitStateChanges (0.22s)
+=== RUN   TestEndToEndWorkflow
+--- PASS: TestEndToEndWorkflow (0.00s)
+=== RUN   TestCircuitBreakerIntegration
+--- PASS: TestCircuitBreakerIntegration (0.00s)
+=== RUN   TestBackgroundCleanupIntegration
+--- PASS: TestBackgroundCleanupIntegration (0.40s)
+=== RUN   TestAuthenticationFailure
+--- PASS: TestAuthenticationFailure (0.00s)
+=== RUN   TestEmptyCache
+--- PASS: TestEmptyCache (0.00s)
+=== RUN   TestStaticTokenHandling
+--- PASS: TestStaticTokenHandling (0.00s)
+=== RUN   TestZeroMaxSize
+--- PASS: TestZeroMaxSize (0.00s)
+=== RUN   TestNilConfig
+    client_pool_test.go:903: expected no panic for edge case configurations
+--- PASS: TestNilConfig (0.00s)
+=== RUN   TestConcurrentShutdownCalls
+--- PASS: TestConcurrentShutdownCalls (0.00s)
+=== RUN   TestSuccessCriteria
+=== RUN   TestSuccessCriteria/ReferenceCountingWorks
+=== RUN   TestSuccessCriteria/CircuitBreakerWorks
+=== RUN   TestSuccessCriteria/MetricsWork
+=== RUN   TestSuccessCriteria/BackwardCompatible
+--- PASS: TestSuccessCriteria (0.15s)
+    --- PASS: TestSuccessCriteria/ReferenceCountingWorks (0.00s)
+    --- PASS: TestSuccessCriteria/CircuitBreakerWorks (0.15s)
+    --- PASS: TestSuccessCriteria/MetricsWork (0.00s)
+    --- PASS: TestSuccessCriteria/BackwardCompatible (0.00s)
+=== RUN   TestDeleteSecret
+=== RUN   TestDeleteSecret/DeleteSecretErrorKV2
+=== RUN   TestDeleteSecret/DeleteSecretUpdatePropertyKV1
+=== RUN   TestDeleteSecret/DeleteSecretFailIfErrorKV2
+=== RUN   TestDeleteSecret/DeleteSecretNotManagedKV2
+=== RUN   TestDeleteSecret/DeleteSecretSuccessKV1
+=== RUN   TestDeleteSecret/DeleteSecretUpdatePropertyKV2
+=== RUN   TestDeleteSecret/DeleteSecretIfNoOtherPropertiesKV1
+=== RUN   TestDeleteSecret/DeleteSecretIfNoOtherPropertiesKV2
+=== RUN   TestDeleteSecret/DeleteSecretNoOpKV1
+=== RUN   TestDeleteSecret/DeleteSecretNoOpKV2
+=== RUN   TestDeleteSecret/DeleteSecretFailIfErrorKV1
+=== RUN   TestDeleteSecret/DeleteSecretNotManagedKV1
+=== RUN   TestDeleteSecret/DeleteSecretSuccessKV2
+=== RUN   TestDeleteSecret/DeleteSecretErrorKV1
+--- PASS: TestDeleteSecret (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretErrorKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretUpdatePropertyKV1 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretFailIfErrorKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretNotManagedKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretSuccessKV1 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretUpdatePropertyKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretIfNoOtherPropertiesKV1 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretIfNoOtherPropertiesKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretNoOpKV1 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretNoOpKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretFailIfErrorKV1 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretNotManagedKV1 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretSuccessKV2 (0.00s)
+    --- PASS: TestDeleteSecret/DeleteSecretErrorKV1 (0.00s)
+=== RUN   TestPushSecret
+=== RUN   TestPushSecret/PushSecretPropertyNoUpdateKV2
+=== RUN   TestPushSecret/CASRequiredPropertyUpdateKV2
+=== RUN   TestPushSecret/SetSecretKV2
+=== RUN   TestPushSecret/SetSecretWithWriteErrorKV1
+=== RUN   TestPushSecret/SetSecretErrorReadingSecretKV1
+=== RUN   TestPushSecret/SetSecretNotManagedByESOV2
+=== RUN   TestPushSecret/CASNotRequiredKV2
+=== RUN   TestPushSecret/CASIgnoredKV1
+=== RUN   TestPushSecret/SetSecretKV1
+=== RUN   TestPushSecret/SetSecretEqualsPushSecretV2
+=== RUN   TestPushSecret/SetSecretErrorReadingSecretKV2
+=== RUN   TestPushSecret/WholeSecretKV2
+=== RUN   TestPushSecret/CASRequiredNewSecretKV2
+=== RUN   TestPushSecret/CASRequiredExistingSecretKV2
+=== RUN   TestPushSecret/SetSecretWithWriteErrorKV2
+=== RUN   TestPushSecret/PushSecretUpdatePropertyKV2
+=== RUN   TestPushSecret/PushSecretPropertyNoUpdateKV1
+=== RUN   TestPushSecret/SetSecretNotManagedByESOV1
+=== RUN   TestPushSecret/SetSecretEqualsPushSecretV1
+=== RUN   TestPushSecret/PushSecretPropertyKV1
+=== RUN   TestPushSecret/PushSecretPropertyKV2
+=== RUN   TestPushSecret/PushSecretUpdatePropertyKV1
+--- PASS: TestPushSecret (0.00s)
+    --- PASS: TestPushSecret/PushSecretPropertyNoUpdateKV2 (0.00s)
+    --- PASS: TestPushSecret/CASRequiredPropertyUpdateKV2 (0.00s)
+    --- PASS: TestPushSecret/SetSecretKV2 (0.00s)
+    --- PASS: TestPushSecret/SetSecretWithWriteErrorKV1 (0.00s)
+    --- PASS: TestPushSecret/SetSecretErrorReadingSecretKV1 (0.00s)
+    --- PASS: TestPushSecret/SetSecretNotManagedByESOV2 (0.00s)
+    --- PASS: TestPushSecret/CASNotRequiredKV2 (0.00s)
+    --- PASS: TestPushSecret/CASIgnoredKV1 (0.00s)
+    --- PASS: TestPushSecret/SetSecretKV1 (0.00s)
+    --- PASS: TestPushSecret/SetSecretEqualsPushSecretV2 (0.00s)
+    --- PASS: TestPushSecret/SetSecretErrorReadingSecretKV2 (0.00s)
+    --- PASS: TestPushSecret/WholeSecretKV2 (0.00s)
+    --- PASS: TestPushSecret/CASRequiredNewSecretKV2 (0.00s)
+    --- PASS: TestPushSecret/CASRequiredExistingSecretKV2 (0.00s)
+    --- PASS: TestPushSecret/SetSecretWithWriteErrorKV2 (0.00s)
+    --- PASS: TestPushSecret/PushSecretUpdatePropertyKV2 (0.00s)
+    --- PASS: TestPushSecret/PushSecretPropertyNoUpdateKV1 (0.00s)
+    --- PASS: TestPushSecret/SetSecretNotManagedByESOV1 (0.00s)
+    --- PASS: TestPushSecret/SetSecretEqualsPushSecretV1 (0.00s)
+    --- PASS: TestPushSecret/PushSecretPropertyKV1 (0.00s)
+    --- PASS: TestPushSecret/PushSecretPropertyKV2 (0.00s)
+    --- PASS: TestPushSecret/PushSecretUpdatePropertyKV1 (0.00s)
+=== RUN   TestNewVault
+=== RUN   TestNewVault/SuccessfulVaultStoreWithK8sCertSecret
+=== RUN   TestNewVault/GetCertSecretKeyMissingError
+=== RUN   TestNewVault/SuccessfulVaultStoreWithIamAuthSecret
+=== RUN   TestNewVault/GetCertConfigMapMissingError
+=== RUN   TestNewVault/GetCertificateFormatError
+=== RUN   TestNewVault/AddVaultStoreCertsError
+=== RUN   TestNewVault/SuccessfulVaultStoreWithCertAuth
+=== RUN   TestNewVault/GetCertNamespaceMissingError
+=== RUN   TestNewVault/SuccessfulVaultStoreWithK8sCertConfigMap
+=== RUN   TestNewVault/GetKeyFormatError
+=== RUN   TestNewVault/SuccessfulVaultStoreValidClientTls
+=== RUN   TestNewVault/SuccessfulVaultStoreWithApproleRef
+=== RUN   TestNewVault/SuccessfulVaultStoreWithSecretRefAndReferentSpec
+=== RUN   TestNewVault/GetKubeServiceAccountError
+=== RUN   TestNewVault/GetKubeSecretError
+=== RUN   TestNewVault/SuccessfulVaultStoreWithJwtAuthAndReferentSpec
+=== RUN   TestNewVault/InvalidVaultStore
+=== RUN   TestNewVault/ValidRetrySettings
+=== RUN   TestNewVault/VaultAuthFormatError
+=== RUN   TestNewVault/ClientTlsInvalidCertificatesError
+=== RUN   TestNewVault/SuccessfulVaultStoreWithSecretRef
+=== RUN   TestNewVault/IamAuthControllerPodNoEnvVars
+=== RUN   TestNewVault/InvalidRetrySettings
+--- PASS: TestNewVault (0.02s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithK8sCertSecret (0.00s)
+    --- PASS: TestNewVault/GetCertSecretKeyMissingError (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithIamAuthSecret (0.00s)
+    --- PASS: TestNewVault/GetCertConfigMapMissingError (0.00s)
+    --- PASS: TestNewVault/GetCertificateFormatError (0.00s)
+    --- PASS: TestNewVault/AddVaultStoreCertsError (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithCertAuth (0.00s)
+    --- PASS: TestNewVault/GetCertNamespaceMissingError (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithK8sCertConfigMap (0.00s)
+    --- PASS: TestNewVault/GetKeyFormatError (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreValidClientTls (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithApproleRef (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithSecretRefAndReferentSpec (0.00s)
+    --- PASS: TestNewVault/GetKubeServiceAccountError (0.00s)
+    --- PASS: TestNewVault/GetKubeSecretError (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithJwtAuthAndReferentSpec (0.00s)
+    --- PASS: TestNewVault/InvalidVaultStore (0.00s)
+    --- PASS: TestNewVault/ValidRetrySettings (0.00s)
+    --- PASS: TestNewVault/VaultAuthFormatError (0.00s)
+    --- PASS: TestNewVault/ClientTlsInvalidCertificatesError (0.00s)
+    --- PASS: TestNewVault/SuccessfulVaultStoreWithSecretRef (0.00s)
+    --- PASS: TestNewVault/IamAuthControllerPodNoEnvVars (0.00s)
+    --- PASS: TestNewVault/InvalidRetrySettings (0.00s)
+=== RUN   TestGetControllerPodCredentials
+=== RUN   TestGetControllerPodCredentials/PodIdentityEnvVars
+=== RUN   TestGetControllerPodCredentials/NoEnvVars
+--- PASS: TestGetControllerPodCredentials (0.00s)
+    --- PASS: TestGetControllerPodCredentials/PodIdentityEnvVars (0.00s)
+    --- PASS: TestGetControllerPodCredentials/NoEnvVars (0.00s)
+=== RUN   TestCache
+--- PASS: TestCache (0.00s)
+=== RUN   TestCacheWithReferentSpec
+--- PASS: TestCacheWithReferentSpec (0.00s)
+=== RUN   TestValidateStore
+=== RUN   TestValidateStore/empty_auth
+=== RUN   TestValidateStore/invalid_approle_with_namespace
+=== RUN   TestValidateStore/invalid_approle_with_roleId_and_no_roleRef
+=== RUN   TestValidateStore/valid_approle_with_roleId_and_no_roleRef
+=== RUN   TestValidateStore/valid_approle_with_roleId_and_no_roleRef#01
+=== RUN   TestValidateStore/invalid_clientcert
+=== RUN   TestValidateStore/invalid_cert_secret
+=== RUN   TestValidateStore/invalid_jwt_secret
+=== RUN   TestValidateStore/invalid_kubernetes_sa
+=== RUN   TestValidateStore/invalid_kubernetes_secret
+=== RUN   TestValidateStore/invalid_ldap_secret
+=== RUN   TestValidateStore/invalid_userpass_secret
+=== RUN   TestValidateStore/invalid_token_secret
+=== RUN   TestValidateStore/valid_clientTls_config
+=== RUN   TestValidateStore/invalid_clientTls_config,_missing_SecretRef
+=== RUN   TestValidateStore/invalid_clientTls_config,_missing_ClientCert
+=== RUN   TestValidateStore/valid_CAS_config_with_KV_v2
+=== RUN   TestValidateStore/invalid_CAS_config_with_KV_v1
+=== RUN   TestValidateStore/CAS_config_not_required_is_valid_with_any_version
+--- PASS: TestValidateStore (0.00s)
+    --- PASS: TestValidateStore/empty_auth (0.00s)
+    --- PASS: TestValidateStore/invalid_approle_with_namespace (0.00s)
+    --- PASS: TestValidateStore/invalid_approle_with_roleId_and_no_roleRef (0.00s)
+    --- PASS: TestValidateStore/valid_approle_with_roleId_and_no_roleRef (0.00s)
+    --- PASS: TestValidateStore/valid_approle_with_roleId_and_no_roleRef#01 (0.00s)
+    --- PASS: TestValidateStore/invalid_clientcert (0.00s)
+    --- PASS: TestValidateStore/invalid_cert_secret (0.00s)
+    --- PASS: TestValidateStore/invalid_jwt_secret (0.00s)
+    --- PASS: TestValidateStore/invalid_kubernetes_sa (0.00s)
+    --- PASS: TestValidateStore/invalid_kubernetes_secret (0.00s)
+    --- PASS: TestValidateStore/invalid_ldap_secret (0.00s)
+    --- PASS: TestValidateStore/invalid_userpass_secret (0.00s)
+    --- PASS: TestValidateStore/invalid_token_secret (0.00s)
+    --- PASS: TestValidateStore/valid_clientTls_config (0.00s)
+    --- PASS: TestValidateStore/invalid_clientTls_config,_missing_SecretRef (0.00s)
+    --- PASS: TestValidateStore/invalid_clientTls_config,_missing_ClientCert (0.00s)
+    --- PASS: TestValidateStore/valid_CAS_config_with_KV_v2 (0.00s)
+    --- PASS: TestValidateStore/invalid_CAS_config_with_KV_v1 (0.00s)
+    --- PASS: TestValidateStore/CAS_config_not_required_is_valid_with_any_version (0.00s)
+PASS
+coverage: 64.9% of statements
+ok  	github.com/external-secrets/external-secrets/pkg/provider/vault	4.790s	coverage: 64.9% of statements
+	github.com/external-secrets/external-secrets/pkg/provider/vault/fake		coverage: 0.0% of statements
+=== RUN   TestTokenFetcher
+--- PASS: TestTokenFetcher (0.00s)
+=== RUN   TestResolver
+--- PASS: TestResolver (0.00s)
+PASS
+coverage: 14.3% of statements
+ok  	github.com/external-secrets/external-secrets/pkg/provider/vault/iamauth	0.253s	coverage: 14.3% of statements
+	github.com/external-secrets/external-secrets/pkg/provider/vault/util		coverage: 0.0% of statements
