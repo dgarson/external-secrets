@@ -71,7 +71,8 @@ type CachingClientPoolConfig struct {
 }
 
 // NewCachingClientPool creates a new caching client pool.
-func NewCachingClientPool(config CachingClientPoolConfig) *CachingClientPool {
+// Returns an error if the LRU cache cannot be created (e.g., invalid MaxCacheSize).
+func NewCachingClientPool(config CachingClientPoolConfig) (*CachingClientPool, error) {
 	if config.NewVaultClient == nil {
 		config.NewVaultClient = NewVaultClient
 	}
@@ -103,11 +104,11 @@ func NewCachingClientPool(config CachingClientPoolConfig) *CachingClientPool {
 		pool.handleEvictedClient(key, managed)
 	})
 	if err != nil {
-		panic(fmt.Sprintf("failed to create LRU cache: %v", err))
+		return nil, fmt.Errorf("failed to create LRU cache: %w", err)
 	}
 
 	pool.cache = cache
-	return pool
+	return pool, nil
 }
 
 // hasDynamicTLS returns true if the provider uses TLS certificates from Kubernetes secrets.

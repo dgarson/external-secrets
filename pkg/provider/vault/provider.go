@@ -341,7 +341,7 @@ func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, ren
 		var metricsPool *MetricsClientPool
 
 		// Layer 2: Create pure caching pool with eviction callback
-		cachingPool := NewCachingClientPool(CachingClientPoolConfig{
+		cachingPool, err := NewCachingClientPool(CachingClientPoolConfig{
 			NewVaultClient:          NewVaultClient,
 			EnableRenewal:           enableRenewal,
 			RenewalThresholdPercent: renewalThreshold,
@@ -355,6 +355,11 @@ func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, ren
 				}
 			},
 		})
+		if err != nil {
+			logger.Error(err, "failed to initialize vault client pool, falling back to no-op pool")
+			clientPool = NewNoOpClientPool(NewVaultClient)
+			return
+		}
 
 		// Layer 3: Wrap with metrics decorator (observability concerns)
 		metricsPool = NewMetricsClientPool(cachingPool)

@@ -115,13 +115,14 @@ func createAppRoleAcquireConfig(server, namespace string) AcquireClientConfig {
 func TestCachingClientPool_BasicCaching(t *testing.T) {
 	var clientCreationCount atomic.Int32
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			clientCreationCount.Add(1)
 			return fake.ClientWithLoginMock(config)
 		},
 		EnableRenewal: false,
 	})
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
@@ -169,10 +170,11 @@ func TestCachingClientPool_BasicCaching(t *testing.T) {
 }
 
 func TestCachingClientPool_DifferentCacheKeys(t *testing.T) {
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: fake.ClientWithLoginMock,
 		EnableRenewal:  false,
 	})
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
@@ -231,7 +233,7 @@ func TestCachingClientPool_StaticTokenHandling(t *testing.T) {
 	var renewalCallCount atomic.Int32
 
 	// Create a client with custom renewal tracking
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			client, err := fake.ClientWithLoginMock(config)
 			if err != nil {
@@ -255,6 +257,7 @@ func TestCachingClientPool_StaticTokenHandling(t *testing.T) {
 		EnableRenewal:        true,
 		RenewalCheckInterval: 50 * time.Millisecond,
 	})
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
@@ -273,7 +276,7 @@ func TestCachingClientPool_StaticTokenHandling(t *testing.T) {
 func TestCachingClientPool_TokenRenewal(t *testing.T) {
 	var renewalCallCount atomic.Int32
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			client, err := fake.ClientWithLoginMock(config)
 			if err != nil {
@@ -308,6 +311,7 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 		RenewalThresholdPercent: 50, // Since we provide explicit RenewalCheckInterval, dynamic calculation is skipped
 		RenewalCheckInterval:    50 * time.Millisecond,
 	})
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
@@ -364,7 +368,7 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 func TestCachingClientPool_Close(t *testing.T) {
 	var revokeCallCount atomic.Int32
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			client, err := fake.ClientWithLoginMock(config)
 			if err != nil {
@@ -388,6 +392,7 @@ func TestCachingClientPool_Close(t *testing.T) {
 		EnableRenewal:        true,
 		RenewalCheckInterval: 100 * time.Millisecond,
 	})
+	require.NoError(t, err)
 
 	ctx := context.Background()
 
@@ -465,7 +470,7 @@ func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
 		}
 	})
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			clientCreationCount.Add(1)
 			return base(config)
@@ -476,6 +481,7 @@ func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
 		TokenOperationTimeout:   200 * time.Millisecond,
 		MaxCacheSize:            1,
 	})
+	require.NoError(t, err)
 	ctx := context.Background()
 
 	config := createAppRoleAcquireConfig("https://vault-renewal.example.com", "renewal-ns")
@@ -505,7 +511,7 @@ func TestCachingClientPool_EvictionWaitsForRelease(t *testing.T) {
 	var revokeCallCount atomic.Int32
 	address := "https://vault-eviction.example.com"
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			client, err := fake.ClientWithLoginMock(config)
 			if err != nil {
@@ -528,6 +534,7 @@ func TestCachingClientPool_EvictionWaitsForRelease(t *testing.T) {
 		EnableRenewal: false,
 		MaxCacheSize:  1,
 	})
+	require.NoError(t, err)
 	ctx := context.Background()
 
 	config1 := createAppRoleAcquireConfig(address, "evict-ns1")
@@ -552,7 +559,7 @@ func TestCachingClientPool_EvictionWaitsForRelease(t *testing.T) {
 func TestCachingClientPool_Concurrency(t *testing.T) {
 	var clientCreationCount atomic.Int32
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			clientCreationCount.Add(1)
 			// Small delay to increase chance of race conditions
@@ -561,6 +568,7 @@ func TestCachingClientPool_Concurrency(t *testing.T) {
 		},
 		EnableRenewal: false,
 	})
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
@@ -603,7 +611,7 @@ func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
 	// Use same pattern as provider.go factory to wire callback
 	var metricsPool *MetricsClientPool
 
-	cachingPool := NewCachingClientPool(CachingClientPoolConfig{
+	cachingPool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
 			cl.MockGetAddress = func() string { return address }
 		}),
@@ -615,6 +623,7 @@ func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
 			}
 		},
 	})
+	require.NoError(t, err)
 
 	// Wrap with MetricsClientPool to emit metrics
 	metricsPool = NewMetricsClientPool(cachingPool)
@@ -716,7 +725,8 @@ func TestCachingClientPool_ReauthFailFast(t *testing.T) {
 		NewVaultClient: vaultClientFactory,
 		EnableRenewal:  false,
 	}
-	pool := NewCachingClientPool(config)
+	pool, err := NewCachingClientPool(config)
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
@@ -765,13 +775,14 @@ func TestCachingClientPool_ReauthFailFast(t *testing.T) {
 func TestCachingClientPool_DynamicTLSBypassesCache(t *testing.T) {
 	var clientCreationCount atomic.Int32
 
-	pool := NewCachingClientPool(CachingClientPoolConfig{
+	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: func(config *vault.Config) (util.Client, error) {
 			clientCreationCount.Add(1)
 			return fake.ClientWithLoginMock(config)
 		},
 		EnableRenewal: false,
 	})
+	require.NoError(t, err)
 	defer pool.Close(context.Background())
 
 	ctx := context.Background()
