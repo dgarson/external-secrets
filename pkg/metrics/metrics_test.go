@@ -38,21 +38,21 @@ func TestObserveStoreAPICall_GranularMetricsDisabled(t *testing.T) {
 
 	// Create a new registry for isolated testing
 	registry := prometheus.NewRegistry()
-	
+
 	// Create metric with granular labels (as SetUpMetrics does)
 	storeLabels := ctrlmetrics.WithGranularLabels(
 		[]string{"provider", "call", "status"},
 		"secretstore_kind", "secretstore_name", "secretstore_namespace",
 	)
-	
+
 	testMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      "test_store_api_calls_count",
 		Help:      "Test metric",
 	}, storeLabels)
-	
+
 	registry.MustRegister(testMetric)
-	
+
 	// Replace global metric temporarily
 	origMetric := storeAPICallsTotal
 	storeAPICallsTotal = testMetric
@@ -133,21 +133,21 @@ func TestObserveStoreAPICall_GranularMetricsEnabled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create a new registry for isolated testing
 			registry := prometheus.NewRegistry()
-			
+
 			// Create metric with granular labels
 			storeLabels := ctrlmetrics.WithGranularLabels(
 				[]string{"provider", "call", "status"},
 				"secretstore_kind", "secretstore_name", "secretstore_namespace",
 			)
-			
+
 			testMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 				Subsystem: ExternalSecretSubsystem,
 				Name:      "test_store_api_calls_count_" + tc.name,
 				Help:      "Test metric",
 			}, storeLabels)
-			
+
 			registry.MustRegister(testMetric)
-			
+
 			// Replace global metric temporarily
 			origMetric := storeAPICallsTotal
 			storeAPICallsTotal = testMetric
@@ -184,20 +184,20 @@ func TestObserveStoreAPICall_MultipleIncrements(t *testing.T) {
 
 	// Create a new registry for isolated testing
 	registry := prometheus.NewRegistry()
-	
+
 	storeLabels := ctrlmetrics.WithGranularLabels(
 		[]string{"provider", "call", "status"},
 		"secretstore_kind", "secretstore_name", "secretstore_namespace",
 	)
-	
+
 	testMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: ExternalSecretSubsystem,
 		Name:      "test_multiple_increments",
 		Help:      "Test metric",
 	}, storeLabels)
-	
+
 	registry.MustRegister(testMetric)
-	
+
 	// Replace global metric temporarily
 	origMetric := storeAPICallsTotal
 	storeAPICallsTotal = testMetric

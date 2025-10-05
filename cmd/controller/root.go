@@ -47,13 +47,13 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/controllers/externalsecret/esmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/generatorstate"
 	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
-	"github.com/external-secrets/external-secrets/pkg/metrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/pushsecret"
 	"github.com/external-secrets/external-secrets/pkg/controllers/pushsecret/psmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/cssmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/ssmetrics"
 	"github.com/external-secrets/external-secrets/pkg/feature"
+	"github.com/external-secrets/external-secrets/pkg/metrics"
 
 	// To allow using gcp auth.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"

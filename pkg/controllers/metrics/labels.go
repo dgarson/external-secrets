@@ -31,7 +31,7 @@ var (
 
 	ConditionMetricLabels = make(map[string]string)
 
-	// EnableGranularMetrics controls whether granular labels (SecretStore refs, provider types, error categories) are added to metrics
+	// EnableGranularMetrics controls whether granular labels (SecretStore refs, provider types, error categories) are added to metrics.
 	EnableGranularMetrics = false
 )
 

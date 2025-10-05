@@ -31,8 +31,8 @@ const (
 )
 
 var (
-	syncCallsTotal      *prometheus.CounterVec
-	storeAPICallsTotal  *prometheus.CounterVec
+	syncCallsTotal     *prometheus.CounterVec
+	storeAPICallsTotal *prometheus.CounterVec
 )
 
 func ObserveAPICall(provider, call string, err error) {
