@@ -226,23 +226,6 @@ func TestObserveStoreAPICall_MultipleIncrements(t *testing.T) {
 	}
 }
 
-func TestObserveAPICall_BeforeMetricsInitialized(t *testing.T) {
-	// Save original state
-	origMetric := syncCallsTotal
-	defer func() {
-		syncCallsTotal = origMetric
-	}()
-
-	// Set to nil to simulate metrics not being initialized
-	syncCallsTotal = nil
-
-	// Should not panic when metrics are not initialized
-	ObserveAPICall("vault", "GetSecret", nil)
-	ObserveAPICall("aws", "PushSecret", errors.New("test error"))
-
-	// Test passes if we get here without panicking
-}
-
 func TestObserveStoreAPICall_BeforeMetricsInitialized(t *testing.T) {
 	// Save original state
 	origEnabled := ctrlmetrics.EnableGranularMetrics

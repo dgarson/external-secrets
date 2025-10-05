@@ -31,14 +31,16 @@ const (
 )
 
 var (
-	syncCallsTotal     *prometheus.CounterVec
+	syncCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: ExternalSecretSubsystem,
+		Name:      providerAPICalls,
+		Help:      "Number of API calls towards the secret provider",
+	}, []string{"provider", "call", "status"})
+
 	storeAPICallsTotal *prometheus.CounterVec
 )
 
 func ObserveAPICall(provider, call string, err error) {
-	if syncCallsTotal == nil {
-		return // Metrics not initialized (common in tests)
-	}
 	syncCallsTotal.WithLabelValues(provider, call, deriveStatus(err)).Inc()
 }
 
@@ -49,17 +51,11 @@ func deriveStatus(err error) string {
 	return constants.StatusSuccess
 }
 
-func SetUpMetrics() {
-	labels := []string{"provider", "call", "status"}
-
-	syncCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Subsystem: ExternalSecretSubsystem,
-		Name:      providerAPICalls,
-		Help:      "Number of API calls towards the secret provider",
-	}, labels)
-
+func init() {
 	metrics.Registry.MustRegister(syncCallsTotal)
+}
 
+func SetUpMetrics() {
 	// Store API calls metric with optional granular labels
 	storeLabels := ctrlmetrics.WithGranularLabels(
 		[]string{"provider", "call", "status"},
