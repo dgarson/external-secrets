@@ -36,6 +36,9 @@ var (
 )
 
 func ObserveAPICall(provider, call string, err error) {
+	if syncCallsTotal == nil {
+		return // Metrics not initialized (common in tests)
+	}
 	syncCallsTotal.WithLabelValues(provider, call, deriveStatus(err)).Inc()
 }
 
@@ -81,6 +84,10 @@ func SetUpMetrics() {
 func ObserveStoreAPICall(storeName, storeKind, storeNamespace, provider, call string, err error) {
 	if !ctrlmetrics.EnableGranularMetrics {
 		return
+	}
+
+	if storeAPICallsTotal == nil {
+		return // Metrics not initialized (common in tests)
 	}
 
 	labels := prometheus.Labels{

@@ -226,6 +226,43 @@ func TestObserveStoreAPICall_MultipleIncrements(t *testing.T) {
 	}
 }
 
+func TestObserveAPICall_BeforeMetricsInitialized(t *testing.T) {
+	// Save original state
+	origMetric := syncCallsTotal
+	defer func() {
+		syncCallsTotal = origMetric
+	}()
+
+	// Set to nil to simulate metrics not being initialized
+	syncCallsTotal = nil
+
+	// Should not panic when metrics are not initialized
+	ObserveAPICall("vault", "GetSecret", nil)
+	ObserveAPICall("aws", "PushSecret", errors.New("test error"))
+
+	// Test passes if we get here without panicking
+}
+
+func TestObserveStoreAPICall_BeforeMetricsInitialized(t *testing.T) {
+	// Save original state
+	origEnabled := ctrlmetrics.EnableGranularMetrics
+	origMetric := storeAPICallsTotal
+	defer func() {
+		ctrlmetrics.EnableGranularMetrics = origEnabled
+		storeAPICallsTotal = origMetric
+	}()
+
+	// Enable granular metrics but set metric to nil
+	ctrlmetrics.EnableGranularMetrics = true
+	storeAPICallsTotal = nil
+
+	// Should not panic when metrics are not initialized
+	ObserveStoreAPICall("test-store", "SecretStore", "default", "vault", "GetSecret", nil)
+	ObserveStoreAPICall("cluster-store", "ClusterSecretStore", "", "aws", "PushSecret", errors.New("test error"))
+
+	// Test passes if we get here without panicking
+}
+
 func TestSetUpMetrics_LabelConfiguration(t *testing.T) {
 	testCases := []struct {
 		name           string
