@@ -117,6 +117,7 @@ func (c *client) listSecrets(ctx context.Context, path string) ([]string, error)
 	secret, err := c.logical.ListWithContext(ctx, url)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultListSecrets, err)
 	if err != nil {
+		c.invalidateSessionOnAuthFailure(ctx, err)
 		return nil, fmt.Errorf(errReadSecret, err)
 	}
 	if secret == nil {

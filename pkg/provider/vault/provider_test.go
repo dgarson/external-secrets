@@ -34,6 +34,7 @@ import (
 	esmeta "github.com/external-secrets/external-secrets/apis/meta/v1"
 	utilfake "github.com/external-secrets/external-secrets/pkg/provider/util/fake"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/fake"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/session"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 )
 
@@ -783,7 +784,7 @@ func TestGetControllerPodCredentials(t *testing.T) {
 func TestCache(t *testing.T) {
 	t.Cleanup(resetCache)
 	enableCache = true
-	initCache(defaultCacheSize)
+	initCache(defaultCacheSize, session.DefaultSafetyWindow)
 
 	prov := &Provider{
 		NewVaultClient: fake.ClientWithLoginMock,
@@ -798,16 +799,27 @@ func TestCache(t *testing.T) {
 		}
 	})
 
+	ctx := context.Background()
+	cfg := vault.DefaultConfig()
+
 	// first request creates a new client:
-	c1, err := getVaultClient(prov, store, nil, namespace)
+	c1, h1, err := getVaultClient(ctx, prov, store, cfg, namespace)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if h1 != nil {
+		t.Cleanup(func() { h1.Release(context.Background()) })
+		c1.SetToken("dummy-token")
+		h1.UpdateLease(&session.Lease{Token: "dummy-token", NonExpiring: true})
+	}
 
 	// seconds request should retrieve cached client instance:
-	c2, err := getVaultClient(prov, store, nil, namespace)
+	c2, h2, err := getVaultClient(ctx, prov, store, cfg, namespace)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if h2 != nil {
+		t.Cleanup(func() { h2.Release(context.Background()) })
 	}
 
 	if c1 != c2 {
@@ -816,9 +828,12 @@ func TestCache(t *testing.T) {
 
 	// third request should retrieve cached client instance even when using a different namespace,
 	// because the ClusterSecretStore references a ServiceAccount of a specific namespace:
-	c3, err := getVaultClient(prov, store, nil, "another-namespace")
+	c3, h3, err := getVaultClient(ctx, prov, store, cfg, "another-namespace")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if h3 != nil {
+		t.Cleanup(func() { h3.Release(context.Background()) })
 	}
 	if c3 != c1 {
 		t.Fatal("Expected a cached client instance")
@@ -828,7 +843,7 @@ func TestCache(t *testing.T) {
 func TestCacheWithReferentSpec(t *testing.T) {
 	t.Cleanup(resetCache)
 	enableCache = true
-	initCache(defaultCacheSize)
+	initCache(defaultCacheSize, session.DefaultSafetyWindow)
 
 	prov := &Provider{
 		NewVaultClient: fake.ClientWithLoginMock,
@@ -841,16 +856,27 @@ func TestCacheWithReferentSpec(t *testing.T) {
 		}
 	})
 
+	ctx := context.Background()
+	cfg := vault.DefaultConfig()
+
 	// first request creates a new client:
-	c1, err := getVaultClient(prov, store, nil, "default")
+	c1, h1, err := getVaultClient(ctx, prov, store, cfg, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if h1 != nil {
+		t.Cleanup(func() { h1.Release(context.Background()) })
+		c1.SetToken("dummy-token")
+		h1.UpdateLease(&session.Lease{Token: "dummy-token", NonExpiring: true})
+	}
 
 	// seconds request should retrieve cached client instance:
-	c2, err := getVaultClient(prov, store, nil, "default")
+	c2, h2, err := getVaultClient(ctx, prov, store, cfg, "default")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if h2 != nil {
+		t.Cleanup(func() { h2.Release(context.Background()) })
 	}
 
 	if c1 != c2 {
@@ -859,9 +885,12 @@ func TestCacheWithReferentSpec(t *testing.T) {
 
 	// third request should retrieve a new client instance,
 	// because the ServiceAccount namespace depends on the namespace of the referent:
-	c3, err := getVaultClient(prov, store, nil, "another-namespace")
+	c3, h3, err := getVaultClient(ctx, prov, store, cfg, "another-namespace")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if h3 != nil {
+		t.Cleanup(func() { h3.Release(context.Background()) })
 	}
 	if c3 == c1 {
 		t.Fatal("Expected a new client instance")
@@ -870,5 +899,7 @@ func TestCacheWithReferentSpec(t *testing.T) {
 
 func resetCache() {
 	enableCache = false
-	clientCache = nil
+	sessionMgr = nil
+	vaultTokenCacheSafetyWindow = session.DefaultSafetyWindow
+	session.ResetMetricsForTest()
 }

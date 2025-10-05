@@ -148,12 +148,16 @@ func (c *client) PushSecret(ctx context.Context, secret *corev1.Secret, data esv
 		_, err = c.logical.WriteWithContext(ctx, metaPath, label)
 		metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
 		if err != nil {
+			c.invalidateSessionOnAuthFailure(ctx, err)
 			return err
 		}
 	}
 	// Otherwise, create or update the version.
 	_, err = c.logical.WriteWithContext(ctx, path, secretToPush)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
+	if err != nil {
+		c.invalidateSessionOnAuthFailure(ctx, err)
+	}
 	return err
 }
 
@@ -196,18 +200,23 @@ func (c *client) DeleteSecret(ctx context.Context, remoteRef esv1.PushSecretRemo
 			}
 			_, err = c.logical.WriteWithContext(ctx, path, secretToPush)
 			metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultDeleteSecret, err)
+			if err != nil {
+				c.invalidateSessionOnAuthFailure(ctx, err)
+			}
 			return err
 		}
 	}
 	_, err = c.logical.DeleteWithContext(ctx, path)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultDeleteSecret, err)
 	if err != nil {
+		c.invalidateSessionOnAuthFailure(ctx, err)
 		return fmt.Errorf("could not delete secret %v: %w", remoteRef.GetRemoteKey(), err)
 	}
 	if c.store.Version == esv1.VaultKVStoreV2 {
 		_, err = c.logical.DeleteWithContext(ctx, metaPath)
 		metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultDeleteSecret, err)
 		if err != nil {
+			c.invalidateSessionOnAuthFailure(ctx, err)
 			return fmt.Errorf("could not delete secret metadata %v: %w", remoteRef.GetRemoteKey(), err)
 		}
 	}
@@ -232,6 +241,7 @@ func (c *client) getCASVersion(ctx context.Context, remoteKey string, secretExis
 
 	secret, err := c.logical.ReadWithDataWithContext(ctx, metaPath, nil)
 	if err != nil {
+		c.invalidateSessionOnAuthFailure(ctx, err)
 		return 0, fmt.Errorf("failed to read metadata: %w", err)
 	}
 

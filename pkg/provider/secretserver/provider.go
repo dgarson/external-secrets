@@ -116,10 +116,10 @@ func validateSecretRef(ref *esv1.SecretServerProviderRef) error {
 		if ref.Value != "" {
 			return errSecretRefAndValueConflict
 		}
-		if ref.SecretRef.Name == "" {
-			return errMissingSecretName
-		}
-		if ref.SecretRef.Key == "" {
+		if ref.SecretRef.Name == "" || ref.SecretRef.Key == "" {
+			if ref.SecretRef.Name == "" {
+				return errMissingSecretName
+			}
 			return errMissingSecretKey
 		}
 	} else if ref.Value == "" {
@@ -129,10 +129,8 @@ func validateSecretRef(ref *esv1.SecretServerProviderRef) error {
 }
 
 func doesConfigDependOnNamespace(cfg *esv1.SecretServerProvider) bool {
-	if cfg.Username.SecretRef != nil && cfg.Username.SecretRef.Namespace == nil {
-		return true
-	}
-	if cfg.Password.SecretRef != nil && cfg.Password.SecretRef.Namespace == nil {
+	if (cfg.Username.SecretRef != nil && cfg.Username.SecretRef.Namespace == nil) ||
+		(cfg.Password.SecretRef != nil && cfg.Password.SecretRef.Namespace == nil) {
 		return true
 	}
 	return false

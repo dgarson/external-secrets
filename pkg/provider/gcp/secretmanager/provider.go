@@ -163,12 +163,8 @@ func clusterProjectID(spec *esv1.SecretStoreSpec) (string, error) {
 }
 
 func isReferentSpec(prov *esv1.GCPSMProvider) bool {
-	if prov.Auth.SecretRef != nil &&
-		prov.Auth.SecretRef.SecretAccessKey.Namespace == nil {
-		return true
-	}
-	if prov.Auth.WorkloadIdentity != nil &&
-		prov.Auth.WorkloadIdentity.ServiceAccountRef.Namespace == nil {
+	if (prov.Auth.SecretRef != nil && prov.Auth.SecretRef.SecretAccessKey.Namespace == nil) ||
+		(prov.Auth.WorkloadIdentity != nil && prov.Auth.WorkloadIdentity.ServiceAccountRef.Namespace == nil) {
 		return true
 	}
 	return false

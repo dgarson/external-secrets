@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"crypto/tls"
 	"os"
 	"time"
@@ -53,6 +54,7 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/cssmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/ssmetrics"
 	"github.com/external-secrets/external-secrets/pkg/feature"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault"
 
 	// To allow using gcp auth.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -123,6 +125,24 @@ var rootCmd = &cobra.Command{
 	Long:  `For more information visit https://external-secrets.io`,
 	Run: func(cmd *cobra.Command, args []string) {
 		setupLogger()
+
+		// Register shutdown handler for Vault token cache if enabled.
+		// This uses context.Background() with a timeout to avoid issues with the
+		// cancelled signal handler context. The defer will execute after mgr.Start()
+		// returns, which is correct - we want to clean up tokens after the controller
+		// has stopped processing.
+		defer func() {
+			if vault.IsRevokeOnShutdownEnabled() {
+				mgr := vault.GetSessionManager()
+				if mgr != nil {
+					timeout := vault.GetShutdownTimeout()
+					ctx, cancel := context.WithTimeout(context.Background(), timeout)
+					defer cancel()
+					setupLog.Info("shutting down vault token cache", "timeout", timeout)
+					mgr.Shutdown(ctx)
+				}
+			}
+		}()
 
 		ctrlmetrics.SetUpLabelNames(enableExtendedMetricLabels)
 		esmetrics.SetUpMetrics()

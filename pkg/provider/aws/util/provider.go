@@ -53,13 +53,11 @@ func GetAWSProvider(store esv1.GenericStore) (*esv1.AWSProvider, error) {
 }
 
 func IsReferentSpec(prov esv1.AWSAuth) bool {
-	if prov.JWTAuth != nil && prov.JWTAuth.ServiceAccountRef != nil && prov.JWTAuth.ServiceAccountRef.Namespace == nil {
-		return true
-	}
-	if prov.SecretRef != nil &&
-		(prov.SecretRef.AccessKeyID.Namespace == nil ||
-			prov.SecretRef.SecretAccessKey.Namespace == nil ||
-			(prov.SecretRef.SessionToken != nil && prov.SecretRef.SessionToken.Namespace == nil)) {
+	if (prov.JWTAuth != nil && prov.JWTAuth.ServiceAccountRef != nil && prov.JWTAuth.ServiceAccountRef.Namespace == nil) ||
+		(prov.SecretRef != nil &&
+			(prov.SecretRef.AccessKeyID.Namespace == nil ||
+				prov.SecretRef.SecretAccessKey.Namespace == nil ||
+				(prov.SecretRef.SessionToken != nil && prov.SecretRef.SessionToken.Namespace == nil))) {
 		return true
 	}
 

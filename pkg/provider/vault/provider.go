@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	vault "github.com/hashicorp/vault/api"
@@ -31,17 +32,20 @@ import (
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
-	"github.com/external-secrets/external-secrets/pkg/cache"
 	"github.com/external-secrets/external-secrets/pkg/feature"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/session"
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
 var (
-	_           esv1.Provider = &Provider{}
-	enableCache bool
-	logger      = ctrl.Log.WithName("provider").WithName("vault")
-	clientCache *cache.Cache[util.Client]
+	_                              esv1.Provider = &Provider{}
+	enableCache                    bool
+	enableRevokeOnShutdown         bool
+	vaultTokenCacheShutdownTimeout time.Duration
+	logger                         = ctrl.Log.WithName("provider").WithName("vault")
+	sessionMgr                     *session.Manager
+	vaultTokenCacheSafetyWindow    = session.DefaultSafetyWindow
 )
 
 const (
@@ -108,14 +112,30 @@ func (p *Provider) NewGeneratorClient(ctx context.Context, kube kclient.Client, 
 		return nil, err
 	}
 
-	client, err := p.NewVaultClient(cfg)
+	client, handle, err := getGeneratorVaultClient(ctx, p, cfg, vaultSpec, namespace)
 	if err != nil {
 		return nil, err
 	}
 
+	vStore.sessionHandle = handle
+	if handle != nil {
+		vStore.sessionLease = handle.Lease()
+		if vStore.sessionLease != nil {
+			vStore.sessionLease.Apply(client)
+		}
+	}
+
 	_, err = p.initClient(ctx, vStore, client, cfg, vaultSpec)
 	if err != nil {
+		if handle != nil {
+			handle.Invalidate(ctx)
+			handle.Release(ctx)
+		}
 		return nil, err
+	}
+
+	if handle != nil {
+		handle.Release(ctx)
 	}
 
 	return client, nil
@@ -140,12 +160,28 @@ func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube 
 		return nil, err
 	}
 
-	client, err := getVaultClient(p, store, cfg, namespace)
+	client, handle, err := getVaultClient(ctx, p, store, cfg, namespace)
 	if err != nil {
 		return nil, fmt.Errorf(errVaultClient, err)
 	}
 
-	return p.initClient(ctx, vStore, client, cfg, vaultSpec)
+	vStore.sessionHandle = handle
+	if handle != nil {
+		vStore.sessionLease = handle.Lease()
+		if vStore.sessionLease != nil {
+			vStore.sessionLease.Apply(client)
+		}
+	}
+
+	cl, err := p.initClient(ctx, vStore, client, cfg, vaultSpec)
+	if err != nil {
+		if handle != nil {
+			handle.Invalidate(ctx)
+			handle.Release(ctx)
+		}
+		return nil, err
+	}
+	return cl, nil
 }
 
 func (p *Provider) initClient(ctx context.Context, c *client, client util.Client, cfg *vault.Config, vaultSpec *esv1.VaultProvider) (esv1.SecretsClient, error) {
@@ -167,14 +203,41 @@ func (p *Provider) initClient(ctx context.Context, c *client, client util.Client
 	c.auth = client.Auth()
 	c.logical = client.Logical()
 	c.token = client.AuthToken()
+	if c.sessionLease != nil {
+		c.sessionLease.Apply(c.client)
+	}
+
+	reuse := false
+	if enableCache && c.sessionLease != nil {
+		window := session.DefaultSafetyWindow
+		if sessionMgr != nil {
+			window = sessionMgr.SafetyWindow()
+		}
+		reuse = c.sessionLease.IsUsable(time.Now(), window)
+	}
 
 	// allow SecretStore controller validation to pass
 	// when using referent namespace.
 	if c.storeKind == esv1.ClusterSecretStoreKind && c.namespace == "" && isReferentSpec(vaultSpec) {
 		return c, nil
 	}
-	if err := c.setAuth(ctx, cfg); err != nil {
-		return nil, err
+	if !reuse {
+		if err := c.setAuth(ctx, cfg); err != nil {
+			if c.sessionHandle != nil {
+				c.sessionHandle.Invalidate(ctx)
+			}
+			return nil, err
+		}
+		if c.sessionHandle != nil {
+			lease, err := c.sessionHandle.RefreshLease(ctx)
+			if err != nil {
+				c.log.Error(err, "unable to refresh cached lease")
+			} else {
+				c.sessionLease = lease
+			}
+		}
+	} else {
+		c.log.V(1).Info("re-using cached vault token")
 	}
 
 	return c, nil
@@ -217,39 +280,113 @@ func (p *Provider) prepareConfig(ctx context.Context, kube kclient.Client, corev
 	return c, cfg, nil
 }
 
-func getVaultClient(p *Provider, store esv1.GenericStore, cfg *vault.Config, namespace string) (util.Client, error) {
+func getVaultClient(ctx context.Context, p *Provider, store esv1.GenericStore, cfg *vault.Config, namespace string) (util.Client, *session.Handle, error) {
 	vaultProvider := store.GetSpec().Provider.Vault
 	auth := vaultProvider.Auth
 	isStaticToken := auth != nil && auth.TokenSecretRef != nil
-	useCache := enableCache && !isStaticToken
+
+	if !enableCache || isStaticToken {
+		client, err := p.NewVaultClient(cfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf(errVaultClient, err)
+		}
+		return client, nil, nil
+	}
+
+	if sessionMgr == nil {
+		return nil, nil, fmt.Errorf("vault session cache not initialised")
+	}
 
 	keyNamespace := store.GetObjectMeta().Namespace
-	// A single ClusterSecretStore may need to spawn separate vault clients for each namespace.
 	if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && namespace != "" && isReferentSpec(vaultProvider) {
 		keyNamespace = namespace
 	}
 
-	key := cache.Key{
-		Name:      store.GetObjectMeta().Name,
-		Namespace: keyNamespace,
-		Kind:      store.GetTypeMeta().Kind,
+	// Cache key layout:
+	//   - qualifier prefix (store vs generator) to avoid collisions with other cache users.
+	//   - store kind, namespace, and name to scope entries uniquely per Store/ClusterSecretStore.
+	// Fingerprint inputs:
+	//   - Vault provider spec (TLS/auth settings) to detect semantic changes.
+	//   - Vault address to separate clusters.
+	//   - Effective namespace the store resolves tokens in.
+	//   - Store resource version and kind to invalidate when the CR is updated.
+	//   - Referent namespace (for ClusterSecretStores) because auth material may vary per target namespace.
+	key := fmt.Sprintf("store|%s|%s|%s", store.GetTypeMeta().Kind, keyNamespace, store.GetObjectMeta().Name)
+	extras := []string{cfg.Address, keyNamespace, store.GetObjectMeta().ResourceVersion, store.GetTypeMeta().Kind}
+	if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && namespace != "" && isReferentSpec(vaultProvider) {
+		extras = append(extras, namespace)
 	}
-	if useCache {
-		client, ok := clientCache.Get(store.GetObjectMeta().ResourceVersion, key)
-		if ok {
-			return client, nil
-		}
+	fingerprint := session.Fingerprint(vaultProvider, extras...)
+
+	scope := strings.ToLower(store.GetTypeMeta().Kind)
+	if scope == "" {
+		scope = "store"
 	}
 
-	client, err := p.NewVaultClient(cfg)
+	handle, err := sessionMgr.Acquire(ctx, session.Request{
+		Key:         key,
+		Fingerprint: fingerprint,
+		Scope:       scope,
+		BuildClient: func() (util.Client, error) {
+			return p.NewVaultClient(cfg)
+		},
+		Cleanup: func(cleanupCtx context.Context, client util.Client) error {
+			return revokeTokenIfValid(cleanupCtx, client)
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf(errVaultClient, err)
+		return nil, nil, err
+	}
+	client := handle.Client()
+	if client == nil {
+		handle.Release(ctx)
+		return nil, nil, fmt.Errorf("vault session returned nil client")
+	}
+	return client, handle, nil
+}
+
+func getGeneratorVaultClient(ctx context.Context, p *Provider, cfg *vault.Config, vaultSpec *esv1.VaultProvider, namespace string) (util.Client, *session.Handle, error) {
+	auth := vaultSpec.Auth
+	isStaticToken := auth != nil && auth.TokenSecretRef != nil
+
+	if !enableCache || isStaticToken {
+		client, err := p.NewVaultClient(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client, nil, nil
+	}
+	if sessionMgr == nil {
+		return nil, nil, fmt.Errorf("vault session cache not initialised")
 	}
 
-	if useCache && !clientCache.Contains(key) {
-		clientCache.Add(store.GetObjectMeta().ResourceVersion, key, client)
+	// Generator cache key combines the namespace in which the generator runs with a hash of the
+	// Vault specification. Fingerprint also considers the Vault address so separate Vault clusters
+	// do not share sessions even if specs are identical.
+	specHash := session.Fingerprint(vaultSpec)
+	key := fmt.Sprintf("generator|%s|%s", namespace, specHash)
+	fingerprint := session.Fingerprint(vaultSpec, namespace, cfg.Address)
+
+	handle, err := sessionMgr.Acquire(ctx, session.Request{
+		Key:         key,
+		Fingerprint: fingerprint,
+		Scope:       "generator",
+		BuildClient: func() (util.Client, error) {
+			return p.NewVaultClient(cfg)
+		},
+		Cleanup: func(cleanupCtx context.Context, client util.Client) error {
+			return revokeTokenIfValid(cleanupCtx, client)
+		},
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return client, nil
+	client := handle.Client()
+	if client == nil {
+		handle.Release(ctx)
+		return nil, nil, fmt.Errorf("vault session returned nil client")
+	}
+	return client, handle, nil
 }
 
 func isReferentSpec(prov *esv1.VaultProvider) bool {
@@ -257,34 +394,26 @@ func isReferentSpec(prov *esv1.VaultProvider) bool {
 		return false
 	}
 
-	if prov.Auth.TokenSecretRef != nil && prov.Auth.TokenSecretRef.Namespace == nil {
+	if (prov.Auth.TokenSecretRef != nil && prov.Auth.TokenSecretRef.Namespace == nil) ||
+		(prov.Auth.AppRole != nil && prov.Auth.AppRole.SecretRef.Namespace == nil) {
 		return true
 	}
-	if prov.Auth.AppRole != nil && prov.Auth.AppRole.SecretRef.Namespace == nil {
+	if prov.Auth.Kubernetes != nil &&
+		((prov.Auth.Kubernetes.SecretRef != nil && prov.Auth.Kubernetes.SecretRef.Namespace == nil) ||
+			(prov.Auth.Kubernetes.ServiceAccountRef != nil && prov.Auth.Kubernetes.ServiceAccountRef.Namespace == nil)) {
 		return true
 	}
-	if prov.Auth.Kubernetes != nil && prov.Auth.Kubernetes.SecretRef != nil && prov.Auth.Kubernetes.SecretRef.Namespace == nil {
+	if (prov.Auth.Ldap != nil && prov.Auth.Ldap.SecretRef.Namespace == nil) ||
+		(prov.Auth.UserPass != nil && prov.Auth.UserPass.SecretRef.Namespace == nil) {
 		return true
 	}
-	if prov.Auth.Kubernetes != nil && prov.Auth.Kubernetes.ServiceAccountRef != nil && prov.Auth.Kubernetes.ServiceAccountRef.Namespace == nil {
+	if prov.Auth.Jwt != nil &&
+		((prov.Auth.Jwt.SecretRef != nil && prov.Auth.Jwt.SecretRef.Namespace == nil) ||
+			(prov.Auth.Jwt.KubernetesServiceAccountToken != nil && prov.Auth.Jwt.KubernetesServiceAccountToken.ServiceAccountRef.Namespace == nil)) {
 		return true
 	}
-	if prov.Auth.Ldap != nil && prov.Auth.Ldap.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.UserPass != nil && prov.Auth.UserPass.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Jwt != nil && prov.Auth.Jwt.SecretRef != nil && prov.Auth.Jwt.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Jwt != nil && prov.Auth.Jwt.KubernetesServiceAccountToken != nil && prov.Auth.Jwt.KubernetesServiceAccountToken.ServiceAccountRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Cert != nil && prov.Auth.Cert.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Iam != nil && prov.Auth.Iam.JWTAuth != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef.Namespace == nil {
+	if (prov.Auth.Cert != nil && prov.Auth.Cert.SecretRef.Namespace == nil) ||
+		(prov.Auth.Iam != nil && prov.Auth.Iam.JWTAuth != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef.Namespace == nil) {
 		return true
 	}
 	if prov.Auth.Iam != nil && prov.Auth.Iam.SecretRef != nil &&
@@ -296,14 +425,26 @@ func isReferentSpec(prov *esv1.VaultProvider) bool {
 	return false
 }
 
-func initCache(size int) {
-	logger.Info("initializing vault cache", "size", size)
-	clientCache = cache.Must(size, func(client util.Client) {
-		err := revokeTokenIfValid(context.Background(), client)
-		if err != nil {
-			logger.Error(err, "unable to revoke cached token on eviction")
-		}
-	})
+func initCache(size int, safetyWindow time.Duration) {
+	logger.V(1).Info("initializing vault cache", "size", size, "safetyWindow", safetyWindow)
+	sessionMgr = session.NewManager(size, logger.WithName("session"))
+	sessionMgr.SetSafetyWindow(safetyWindow)
+}
+
+// GetSessionManager returns the global Vault session manager for shutdown purposes.
+// Returns nil if cache is not enabled or not initialized.
+func GetSessionManager() *session.Manager {
+	return sessionMgr
+}
+
+// IsRevokeOnShutdownEnabled returns whether token revocation on shutdown is enabled.
+func IsRevokeOnShutdownEnabled() bool {
+	return enableCache && enableRevokeOnShutdown
+}
+
+// GetShutdownTimeout returns the configured timeout for shutdown token revocation.
+func GetShutdownTimeout() time.Duration {
+	return vaultTokenCacheShutdownTimeout
 }
 
 func init() {
@@ -312,9 +453,12 @@ func init() {
 	fs.BoolVar(&enableCache, "experimental-enable-vault-token-cache", false, "Enable experimental Vault token cache. External secrets will reuse the Vault token without creating a new one on each request.")
 	// max. 265k vault leases with 30bytes each ~= 7MB
 	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize, "Maximum size of Vault token cache. When more tokens than Only used if --experimental-enable-vault-token-cache is set.")
+	fs.DurationVar(&vaultTokenCacheSafetyWindow, "experimental-vault-token-cache-safety-window", session.DefaultSafetyWindow, "Safety window before token expiry that triggers re-authentication for cached Vault sessions.")
+	fs.BoolVar(&enableRevokeOnShutdown, "experimental-vault-token-cache-revoke-on-shutdown", false, "Revoke all cached Vault tokens on controller shutdown. Only used if --experimental-enable-vault-token-cache is set.")
+	fs.DurationVar(&vaultTokenCacheShutdownTimeout, "experimental-vault-token-cache-shutdown-timeout", 10*time.Second, "Maximum time to wait for token revocation during shutdown. Only used if --experimental-vault-token-cache-revoke-on-shutdown is set.")
 	feature.Register(feature.Feature{
 		Flags:      fs,
-		Initialize: func() { initCache(vaultTokenCacheSize) },
+		Initialize: func() { initCache(vaultTokenCacheSize, vaultTokenCacheSafetyWindow) },
 	})
 
 	esv1.Register(&Provider{

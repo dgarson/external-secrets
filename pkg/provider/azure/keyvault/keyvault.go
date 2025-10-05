@@ -1250,14 +1250,11 @@ func (a *Azure) Validate() (esv1.ValidationResult, error) {
 
 func isReferentSpec(prov *esv1.AzureKVProvider) bool {
 	if prov.AuthSecretRef != nil &&
-		((prov.AuthSecretRef.ClientID != nil &&
-			prov.AuthSecretRef.ClientID.Namespace == nil) ||
-			(prov.AuthSecretRef.ClientSecret != nil &&
-				prov.AuthSecretRef.ClientSecret.Namespace == nil)) {
+		((prov.AuthSecretRef.ClientID != nil && prov.AuthSecretRef.ClientID.Namespace == nil) ||
+			(prov.AuthSecretRef.ClientSecret != nil && prov.AuthSecretRef.ClientSecret.Namespace == nil)) {
 		return true
 	}
-	if prov.ServiceAccountRef != nil &&
-		prov.ServiceAccountRef.Namespace == nil {
+	if prov.ServiceAccountRef != nil && prov.ServiceAccountRef.Namespace == nil {
 		return true
 	}
 	return false

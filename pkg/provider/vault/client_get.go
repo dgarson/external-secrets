@@ -133,6 +133,7 @@ func (c *client) readSecret(ctx context.Context, path, version string) (map[stri
 	vaultSecret, err := c.logical.ReadWithDataWithContext(ctx, dataPath, params)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultReadSecretData, err)
 	if err != nil {
+		c.invalidateSessionOnAuthFailure(ctx, err)
 		return nil, fmt.Errorf(errReadSecret, err)
 	}
 	if vaultSecret == nil {
@@ -195,6 +196,7 @@ func (c *client) readSecretMetadata(ctx context.Context, path string) (map[strin
 	secret, err := c.logical.ReadWithDataWithContext(ctx, url, nil)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultReadSecretData, err)
 	if err != nil {
+		c.invalidateSessionOnAuthFailure(ctx, err)
 		return nil, fmt.Errorf(errReadSecret, err)
 	}
 	if secret == nil {

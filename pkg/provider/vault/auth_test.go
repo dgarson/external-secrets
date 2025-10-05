@@ -139,12 +139,23 @@ func TestSetAuthNamespace(t *testing.T) {
 				t.Error(err.Error())
 			}
 
-			client, err := getVaultClient(prov, tc.args.store, cfg, "default")
+			ctx := context.Background()
+			client, handle, err := getVaultClient(ctx, prov, tc.args.store, cfg, "default")
 			if err != nil {
 				t.Errorf("vault.useAuthNamespace: failed to create client: %s", err.Error())
 			}
+			c.sessionHandle = handle
+			if handle != nil {
+				c.sessionLease = handle.Lease()
+				if c.sessionLease != nil {
+					c.sessionLease.Apply(client)
+				}
+				t.Cleanup(func() {
+					handle.Release(context.Background())
+				})
+			}
 
-			_, err = prov.initClient(context.Background(), c, client, cfg, tc.args.store.Spec.Provider.Vault)
+			_, err = prov.initClient(ctx, c, client, cfg, tc.args.store.Spec.Provider.Vault)
 			if err != nil {
 				t.Errorf("vault.useAuthNamespace: failed to init client: %s", err.Error())
 			}
@@ -157,7 +168,7 @@ func TestSetAuthNamespace(t *testing.T) {
 			}
 
 			// during authentication (getting a token)
-			resetNS := c.useAuthNamespace(context.Background())
+			resetNS := c.useAuthNamespace(ctx)
 			actual.During = c.client.Namespace()
 			resetNS()
 
