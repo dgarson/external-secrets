@@ -148,10 +148,14 @@ var authErrorHints = []string{
 	"invalid lease",
 }
 
+// invalidateSessionOnAuthFailure detects authentication/authorization failures and
+// invalidates the cached session to force re-authentication on the next request.
+// This prevents cascading failures when tokens expire or are revoked.
 func (c *client) invalidateSessionOnAuthFailure(ctx context.Context, err error) {
 	if err == nil || c.sessionHandle == nil {
 		return
 	}
+	// First check for structured HTTP errors (401/403)
 	var respErr *vault.ResponseError
 	if errors.As(err, &respErr) {
 		if respErr.StatusCode == http.StatusUnauthorized || respErr.StatusCode == http.StatusForbidden {
@@ -161,6 +165,8 @@ func (c *client) invalidateSessionOnAuthFailure(ctx context.Context, err error) 
 		}
 		return
 	}
+	// Fallback: Check error message for known auth failure patterns
+	// This handles cases where Vault returns errors without proper HTTP status codes
 	lower := strings.ToLower(err.Error())
 	for _, hint := range authErrorHints {
 		if strings.Contains(lower, hint) {

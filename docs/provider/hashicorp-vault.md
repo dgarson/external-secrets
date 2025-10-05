@@ -420,10 +420,12 @@ The provider automatically detects which authentication method is available and 
 
 ### Experimental Token Cache (advanced)
 
-External Secrets Operator can reuse Vault sessions when the controller flag `--experimental-enable-vault-token-cache` is set. Two related knobs are provided:
+External Secrets Operator can reuse Vault sessions when the controller flag `--experimental-enable-vault-token-cache` is set. Four related knobs are provided:
 
 - `--experimental-vault-token-cache-size` — Maximum number of cached clients (default `131072`).
 - `--experimental-vault-token-cache-safety-window` — Duration before a token expires that forces a new login (default `1m`).
+- `--experimental-vault-token-cache-revoke-on-shutdown` — Revoke all cached tokens during controller shutdown (default `false`).
+- `--experimental-vault-token-cache-shutdown-timeout` — Maximum time to wait for token revocation during shutdown (default `10s`).
 
 Each cached entry is keyed by:
 
@@ -433,7 +435,19 @@ Each cached entry is keyed by:
 - Store resource version and a hash of the Vault spec (TLS + auth settings) so any configuration change invalidates the cached session.
 - For referent ClusterSecretStores, the target namespace is added to the fingerprint because different namespaces often require different auth credentials.
 
-Cached sessions are automatically invalidated when the Store spec changes, when Vault replies with `401/403` (or well-known token errors such as “permission denied” or “expired token”), or when the cache evicts the least recently used entry to keep within its size limit. Generator-based flows (`generatorRef: vaultDynamicSecret`) participate in the same cache under the `generator` scope.
+Cached sessions are automatically invalidated when the Store spec changes, when Vault replies with `401/403` (or well-known token errors such as "permission denied" or "expired token"), or when the cache evicts the least recently used entry to keep within its size limit. Generator-based flows (`generatorRef: vaultDynamicSecret`) participate in the same cache under the `generator` scope.
+
+#### Graceful Shutdown
+
+When `--experimental-vault-token-cache-revoke-on-shutdown` is enabled, the controller will revoke all cached Vault tokens during shutdown. This ensures no orphaned tokens remain after controller restarts or upgrades. Token revocation happens asynchronously but will block shutdown for up to `--experimental-vault-token-cache-shutdown-timeout` (default 10 seconds) to allow revocation to complete.
+
+The shutdown process uses a fresh context with timeout to avoid issues with the cancelled signal handler context. If token revocation takes longer than the configured timeout, the controller will exit anyway, and tokens will expire based on their Vault TTL.
+
+If disabled (default), cached tokens will naturally expire based on their TTL but will not be explicitly revoked. This may be preferable in environments where controller restarts are frequent or where Vault token revocation operations should be minimized.
+
+**Note**: Kubernetes pods have a `terminationGracePeriodSeconds` (default 30s), so the 10s default shutdown timeout is well within safe limits. Adjust the timeout based on your cache size and Vault latency.
+
+#### Observability
 
 The following Prometheus metrics are emitted to describe cache health: `vault_token_cache_hits_total`, `vault_token_cache_misses_total`, `vault_token_cache_invalidations_total` (with a `reason` label), `vault_token_cache_evictions_total`, and `vault_token_cache_entries`. See [Vault token cache metrics](../api/metrics.md#vault-token-cache-metrics) for details. Cache log lines are emitted at debug level (`-v=1`).
 

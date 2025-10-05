@@ -30,16 +30,10 @@ type Lease struct {
 }
 
 func (l *Lease) IsUsable(now time.Time, safetyWindow time.Duration) bool {
-	if l == nil {
+	if l == nil || l.Token == "" {
 		return false
 	}
-	if l.Token == "" {
-		return false
-	}
-	if l.NonExpiring {
-		return true
-	}
-	if l.ExpiresAt.IsZero() {
+	if l.NonExpiring || l.ExpiresAt.IsZero() {
 		return true
 	}
 	return now.Add(safetyWindow).Before(l.ExpiresAt)

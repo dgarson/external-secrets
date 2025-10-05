@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -92,4 +93,113 @@ func TestLookupLease(t *testing.T) {
 	if lease.ExpiresAt.IsZero() {
 		t.Fatalf("expected expiration time to be set")
 	}
+}
+
+func TestLeaseApplyNilCases(t *testing.T) {
+	t.Run("nil lease", func(t *testing.T) {
+		var l *Lease
+		client := &util.VaultClient{
+			SetTokenFunc: func(v string) { t.Fatal("should not be called") },
+		}
+		l.Apply(client)
+	})
+
+	t.Run("nil client", func(t *testing.T) {
+		l := &Lease{Token: "test"}
+		l.Apply(nil)
+	})
+}
+
+func TestLookupLeaseErrorPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil client", func(t *testing.T) {
+		_, err := LookupLease(ctx, nil)
+		if err == nil {
+			t.Fatal("expected error for nil client")
+		}
+	})
+
+	t.Run("lookup error", func(t *testing.T) {
+		client := &util.VaultClient{
+			TokenFunc: func() string { return "tok" },
+			AuthTokenField: fake.Token{
+				LookupSelfWithContextFn: func(context.Context) (*vault.Secret, error) {
+					return nil, fmt.Errorf("lookup failed")
+				},
+			},
+		}
+		_, err := LookupLease(ctx, client)
+		if err == nil {
+			t.Fatal("expected error from lookup")
+		}
+	})
+
+	t.Run("missing ttl defaults to zero", func(t *testing.T) {
+		secret := &vault.Secret{Data: map[string]any{
+			"id":       "id123",
+			"accessor": "acc456",
+		}}
+		client := &util.VaultClient{
+			TokenFunc: func() string { return "tok" },
+			AuthTokenField: fake.Token{
+				LookupSelfWithContextFn: func(context.Context) (*vault.Secret, error) {
+					return secret, nil
+				},
+			},
+		}
+		lease, err := LookupLease(ctx, client)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Missing ttl should be treated as non-expiring
+		if !lease.NonExpiring {
+			t.Fatal("expected non-expiring lease when ttl is missing")
+		}
+	})
+
+	t.Run("non-renewable with zero ttl", func(t *testing.T) {
+		secret := &vault.Secret{Data: map[string]any{
+			"id":        "id123",
+			"accessor":  "acc456",
+			"renewable": false,
+			"ttl":       json.Number("0"),
+		}}
+		client := &util.VaultClient{
+			TokenFunc: func() string { return "tok" },
+			AuthTokenField: fake.Token{
+				LookupSelfWithContextFn: func(context.Context) (*vault.Secret, error) {
+					return secret, nil
+				},
+			},
+		}
+		lease, err := LookupLease(ctx, client)
+		if err != nil {
+			t.Fatalf("lookup lease: %v", err)
+		}
+		if !lease.NonExpiring {
+			t.Fatal("expected non-expiring lease for zero ttl non-renewable")
+		}
+	})
+
+	t.Run("invalid ttl format", func(t *testing.T) {
+		secret := &vault.Secret{Data: map[string]any{
+			"id":        "id123",
+			"accessor":  "acc456",
+			"renewable": true,
+			"ttl":       "not-a-number",
+		}}
+		client := &util.VaultClient{
+			TokenFunc: func() string { return "tok" },
+			AuthTokenField: fake.Token{
+				LookupSelfWithContextFn: func(context.Context) (*vault.Secret, error) {
+					return secret, nil
+				},
+			},
+		}
+		_, err := LookupLease(ctx, client)
+		if err == nil {
+			t.Fatal("expected error for invalid ttl format")
+		}
+	})
 }

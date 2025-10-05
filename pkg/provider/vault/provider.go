@@ -39,11 +39,13 @@ import (
 )
 
 var (
-	_                           esv1.Provider = &Provider{}
-	enableCache                 bool
-	logger                      = ctrl.Log.WithName("provider").WithName("vault")
-	sessionMgr                  *session.Manager
-	vaultTokenCacheSafetyWindow = session.DefaultSafetyWindow
+	_                              esv1.Provider = &Provider{}
+	enableCache                    bool
+	enableRevokeOnShutdown         bool
+	vaultTokenCacheShutdownTimeout time.Duration
+	logger                         = ctrl.Log.WithName("provider").WithName("vault")
+	sessionMgr                     *session.Manager
+	vaultTokenCacheSafetyWindow    = session.DefaultSafetyWindow
 )
 
 const (
@@ -392,34 +394,26 @@ func isReferentSpec(prov *esv1.VaultProvider) bool {
 		return false
 	}
 
-	if prov.Auth.TokenSecretRef != nil && prov.Auth.TokenSecretRef.Namespace == nil {
+	if (prov.Auth.TokenSecretRef != nil && prov.Auth.TokenSecretRef.Namespace == nil) ||
+		(prov.Auth.AppRole != nil && prov.Auth.AppRole.SecretRef.Namespace == nil) {
 		return true
 	}
-	if prov.Auth.AppRole != nil && prov.Auth.AppRole.SecretRef.Namespace == nil {
+	if prov.Auth.Kubernetes != nil &&
+		((prov.Auth.Kubernetes.SecretRef != nil && prov.Auth.Kubernetes.SecretRef.Namespace == nil) ||
+			(prov.Auth.Kubernetes.ServiceAccountRef != nil && prov.Auth.Kubernetes.ServiceAccountRef.Namespace == nil)) {
 		return true
 	}
-	if prov.Auth.Kubernetes != nil && prov.Auth.Kubernetes.SecretRef != nil && prov.Auth.Kubernetes.SecretRef.Namespace == nil {
+	if (prov.Auth.Ldap != nil && prov.Auth.Ldap.SecretRef.Namespace == nil) ||
+		(prov.Auth.UserPass != nil && prov.Auth.UserPass.SecretRef.Namespace == nil) {
 		return true
 	}
-	if prov.Auth.Kubernetes != nil && prov.Auth.Kubernetes.ServiceAccountRef != nil && prov.Auth.Kubernetes.ServiceAccountRef.Namespace == nil {
+	if prov.Auth.Jwt != nil &&
+		((prov.Auth.Jwt.SecretRef != nil && prov.Auth.Jwt.SecretRef.Namespace == nil) ||
+			(prov.Auth.Jwt.KubernetesServiceAccountToken != nil && prov.Auth.Jwt.KubernetesServiceAccountToken.ServiceAccountRef.Namespace == nil)) {
 		return true
 	}
-	if prov.Auth.Ldap != nil && prov.Auth.Ldap.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.UserPass != nil && prov.Auth.UserPass.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Jwt != nil && prov.Auth.Jwt.SecretRef != nil && prov.Auth.Jwt.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Jwt != nil && prov.Auth.Jwt.KubernetesServiceAccountToken != nil && prov.Auth.Jwt.KubernetesServiceAccountToken.ServiceAccountRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Cert != nil && prov.Auth.Cert.SecretRef.Namespace == nil {
-		return true
-	}
-	if prov.Auth.Iam != nil && prov.Auth.Iam.JWTAuth != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef.Namespace == nil {
+	if (prov.Auth.Cert != nil && prov.Auth.Cert.SecretRef.Namespace == nil) ||
+		(prov.Auth.Iam != nil && prov.Auth.Iam.JWTAuth != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef != nil && prov.Auth.Iam.JWTAuth.ServiceAccountRef.Namespace == nil) {
 		return true
 	}
 	if prov.Auth.Iam != nil && prov.Auth.Iam.SecretRef != nil &&
@@ -437,6 +431,22 @@ func initCache(size int, safetyWindow time.Duration) {
 	sessionMgr.SetSafetyWindow(safetyWindow)
 }
 
+// GetSessionManager returns the global Vault session manager for shutdown purposes.
+// Returns nil if cache is not enabled or not initialized.
+func GetSessionManager() *session.Manager {
+	return sessionMgr
+}
+
+// IsRevokeOnShutdownEnabled returns whether token revocation on shutdown is enabled.
+func IsRevokeOnShutdownEnabled() bool {
+	return enableCache && enableRevokeOnShutdown
+}
+
+// GetShutdownTimeout returns the configured timeout for shutdown token revocation.
+func GetShutdownTimeout() time.Duration {
+	return vaultTokenCacheShutdownTimeout
+}
+
 func init() {
 	var vaultTokenCacheSize int
 	fs := pflag.NewFlagSet("vault", pflag.ExitOnError)
@@ -444,6 +454,8 @@ func init() {
 	// max. 265k vault leases with 30bytes each ~= 7MB
 	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize, "Maximum size of Vault token cache. When more tokens than Only used if --experimental-enable-vault-token-cache is set.")
 	fs.DurationVar(&vaultTokenCacheSafetyWindow, "experimental-vault-token-cache-safety-window", session.DefaultSafetyWindow, "Safety window before token expiry that triggers re-authentication for cached Vault sessions.")
+	fs.BoolVar(&enableRevokeOnShutdown, "experimental-vault-token-cache-revoke-on-shutdown", false, "Revoke all cached Vault tokens on controller shutdown. Only used if --experimental-enable-vault-token-cache is set.")
+	fs.DurationVar(&vaultTokenCacheShutdownTimeout, "experimental-vault-token-cache-shutdown-timeout", 10*time.Second, "Maximum time to wait for token revocation during shutdown. Only used if --experimental-vault-token-cache-revoke-on-shutdown is set.")
 	feature.Register(feature.Feature{
 		Flags:      fs,
 		Initialize: func() { initCache(vaultTokenCacheSize, vaultTokenCacheSafetyWindow) },
