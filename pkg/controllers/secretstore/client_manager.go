@@ -18,6 +18,7 @@ package secretstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -31,7 +32,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	esapi "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
 )
@@ -143,7 +143,7 @@ func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespa
 	}
 
 	// Create metrics observer function
-	providerType, _ := esapi.GetProviderName(store)
+	providerType := getProviderName(store)
 	observe := ctrlmetrics.NewStoreMetricsObserver(
 		store.GetName(),
 		func() string {
@@ -306,4 +306,35 @@ func assertStoreIsUsable(store esv1.GenericStore) error {
 		return fmt.Errorf(errSecretStoreNotReady, store.GetKind(), store.GetName())
 	}
 	return nil
+}
+
+// getProviderName returns the provider name from the generic store.
+// Returns empty string on error since this is only used for metrics labels.
+func getProviderName(s esv1.GenericStore) string {
+	if s == nil {
+		return ""
+	}
+	spec := s.GetSpec()
+	if spec == nil {
+		return ""
+	}
+
+	// Use JSON marshaling to determine which provider field is set
+	// This matches the logic in apis/externalsecrets/v1/provider_schema.go
+	storeBytes, err := json.Marshal(spec.Provider)
+	if err != nil || storeBytes == nil {
+		return ""
+	}
+
+	storeMap := make(map[string]any)
+	if err := json.Unmarshal(storeBytes, &storeMap); err != nil {
+		return ""
+	}
+
+	// Return the first (and should be only) key
+	for k := range storeMap {
+		return k
+	}
+
+	return ""
 }

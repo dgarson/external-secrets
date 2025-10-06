@@ -161,7 +161,7 @@ func validateStore(ctx context.Context, namespace, controllerClass string, store
 	}
 
 	// Create metrics observer for store API calls
-	providerType, _ := esapi.GetProviderName(store)
+	providerType := getProviderName(store)
 	observe := ctrlmetrics.NewStoreMetricsObserver(
 		store.GetName(),
 		func() string {
