@@ -38,19 +38,13 @@ func SetUpMetrics() {
 		Subsystem: SecretStoreSubsystem,
 		Name:      SecretStoreReconcileDurationKey,
 		Help:      "The duration time to reconcile the Secret Store",
-	}, ctrlmetrics.WithGranularLabels(
-		ctrlmetrics.NonConditionMetricLabelNames,
-		"provider_type",
-	))
+	}, ctrlmetrics.NonConditionMetricLabelNames)
 
 	secretStoreCondition := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: SecretStoreSubsystem,
 		Name:      commonmetrics.StatusConditionKey,
 		Help:      "The status condition of a specific Secret Store",
-	}, ctrlmetrics.WithGranularLabels(
-		ctrlmetrics.ConditionMetricLabelNames,
-		"provider_type",
-	))
+	}, ctrlmetrics.ConditionMetricLabelNames)
 
 	metrics.Registry.MustRegister(secretStoreReconcileDuration, secretStoreCondition)
 

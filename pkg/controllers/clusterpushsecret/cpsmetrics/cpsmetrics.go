@@ -36,27 +36,17 @@ var gaugeVecMetrics = map[string]*prometheus.GaugeVec{}
 // SetUpMetrics is called at the root to set-up the metric logic using the
 // config flags provided.
 func SetUpMetrics() {
-	// Get label sets with optional granular labels
-	// Note: ClusterPushSecret only tracks secretstore_name (ClusterSecretStore has no namespace)
-	conditionLabels := ctrlmetrics.WithGranularLabels(
-		ctrlmetrics.ConditionMetricLabelNames,
-		"secretstore_name",
-	)
-
 	ClusterPushSecretReconcileDuration := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: ClusterPushSecretSubsystem,
 		Name:      ClusterPushSecretReconcileDurationKey,
 		Help:      "The duration time to reconcile the Cluster Push Secret",
-	}, ctrlmetrics.WithGranularLabels(
-		ctrlmetrics.NonConditionMetricLabelNames,
-		"secretstore_name",
-	))
+	}, ctrlmetrics.NonConditionMetricLabelNames)
 
 	ClusterPushSecretCondition := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Subsystem: ClusterPushSecretSubsystem,
 		Name:      ClusterPushSecretStatusConditionKey,
 		Help:      "The status condition of a specific Cluster Push Secret",
-	}, conditionLabels)
+	}, ctrlmetrics.ConditionMetricLabelNames)
 
 	metrics.Registry.MustRegister(ClusterPushSecretReconcileDuration, ClusterPushSecretCondition)
 

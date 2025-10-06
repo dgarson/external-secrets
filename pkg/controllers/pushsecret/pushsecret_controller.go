@@ -138,16 +138,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("get resource: %w", err)
 	}
 
-	// Add SecretStore reference labels if granular metrics is enabled
-	if len(ps.Spec.SecretStoreRefs) > 0 {
-		resourceLabels = ctrlmetrics.AddStoreRefLabels(
-			resourceLabels,
-			ps.Spec.SecretStoreRefs[0].Name,
-			ps.Spec.SecretStoreRefs[0].Kind,
-			ps.Namespace,
-		)
-	}
-
 	refreshInt := r.RequeueInterval
 	if ps.Spec.RefreshInterval != nil {
 		refreshInt = ps.Spec.RefreshInterval.Duration
@@ -340,13 +330,13 @@ func (r *Reconciler) DeleteSecretFromProviders(ctx context.Context, ps *esapi.Pu
 			Name: strings.Split(storeName, "/")[1],
 			Kind: strings.Split(storeName, "/")[0],
 		}
-		client, observe, err := mgr.Get(ctx, storeRef, ps.Namespace, nil)
+		client, err := mgr.Get(ctx, storeRef, ps.Namespace, nil)
 		if err != nil {
 			return out, fmt.Errorf("could not get secrets client for store %v: %w", storeName, err)
 		}
 		newData, ok := newMap[storeName]
 		if !ok {
-			err = r.DeleteAllSecretsFromStore(ctx, client, observe, oldData)
+			err = r.DeleteAllSecretsFromStore(ctx, client, oldData)
 			if err != nil {
 				return out, err
 			}
@@ -356,7 +346,7 @@ func (r *Reconciler) DeleteSecretFromProviders(ctx context.Context, ps *esapi.Pu
 		for oldEntry, oldRef := range oldData {
 			_, ok := newData[oldEntry]
 			if !ok {
-				err = r.DeleteSecretFromStore(ctx, client, observe, oldRef)
+				err = r.DeleteSecretFromStore(ctx, client, oldRef)
 				if err != nil {
 					return out, err
 				}
@@ -367,9 +357,9 @@ func (r *Reconciler) DeleteSecretFromProviders(ctx context.Context, ps *esapi.Pu
 	return out, nil
 }
 
-func (r *Reconciler) DeleteAllSecretsFromStore(ctx context.Context, client esv1.SecretsClient, observe func(string, error), data map[string]esapi.PushSecretData) error {
+func (r *Reconciler) DeleteAllSecretsFromStore(ctx context.Context, client esv1.SecretsClient, data map[string]esapi.PushSecretData) error {
 	for _, v := range data {
-		err := r.DeleteSecretFromStore(ctx, client, observe, v)
+		err := r.DeleteSecretFromStore(ctx, client, v)
 		if err != nil {
 			return err
 		}
@@ -377,10 +367,8 @@ func (r *Reconciler) DeleteAllSecretsFromStore(ctx context.Context, client esv1.
 	return nil
 }
 
-func (r *Reconciler) DeleteSecretFromStore(ctx context.Context, client esv1.SecretsClient, observe func(string, error), data esapi.PushSecretData) error {
-	err := client.DeleteSecret(ctx, data.Match.RemoteRef)
-	observe(ctrlmetrics.OperationDeleteSecret, err)
-	return err
+func (r *Reconciler) DeleteSecretFromStore(ctx context.Context, client esv1.SecretsClient, data esapi.PushSecretData) error {
+	return client.DeleteSecret(ctx, data.Match.RemoteRef)
 }
 
 func (r *Reconciler) PushSecretToProviders(ctx context.Context, stores map[esapi.PushSecretStoreRef]esv1.GenericStore, ps esapi.PushSecret, secret *v1.Secret, mgr *secretstore.Manager) (esapi.SyncedPushSecretsMap, error) {
@@ -402,7 +390,7 @@ func (r *Reconciler) handlePushSecretDataForStore(ctx context.Context, ps esapi.
 		Kind: refKind,
 	}
 	originalSecretData := secret.Data
-	secretClient, observe, err := mgr.Get(ctx, storeRef, ps.GetNamespace(), nil)
+	secretClient, err := mgr.Get(ctx, storeRef, ps.GetNamespace(), nil)
 	if err != nil {
 		return out, fmt.Errorf("could not get secrets client for store %v: %w", storeName, err)
 	}
@@ -419,7 +407,6 @@ func (r *Reconciler) handlePushSecretDataForStore(ctx context.Context, ps esapi.
 		switch ps.Spec.UpdatePolicy {
 		case esapi.PushSecretUpdatePolicyIfNotExists:
 			exists, err := secretClient.SecretExists(ctx, data.Match.RemoteRef)
-			observe(ctrlmetrics.OperationSecretExists, err)
 			if err != nil {
 				return out, fmt.Errorf("could not verify if secret exists in store: %w", err)
 			} else if exists {
@@ -429,9 +416,7 @@ func (r *Reconciler) handlePushSecretDataForStore(ctx context.Context, ps esapi.
 		case esapi.PushSecretUpdatePolicyReplace:
 		default:
 		}
-		err = secretClient.PushSecret(ctx, secret, data)
-		observe(ctrlmetrics.OperationPushSecret, err)
-		if err != nil {
+		if err := secretClient.PushSecret(ctx, secret, data); err != nil {
 			return out, fmt.Errorf(errSetSecretFailed, key, storeName, err)
 		}
 		out[storeKey][statusRef(data)] = data

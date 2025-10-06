@@ -213,14 +213,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// if extended metrics is enabled, refine the time series vector
 	resourceLabels = ctrlmetrics.RefineLabels(resourceLabels, externalSecret.Labels)
 
-	// Add SecretStore reference labels if granular metrics is enabled
-	resourceLabels = ctrlmetrics.AddStoreRefLabels(
-		resourceLabels,
-		externalSecret.Spec.SecretStoreRef.Name,
-		externalSecret.Spec.SecretStoreRef.Kind,
-		externalSecret.Namespace,
-	)
-
 	// skip this ExternalSecret if it uses a ClusterSecretStore and the feature is disabled
 	if shouldSkipClusterSecretStore(r, externalSecret) {
 		log.V(1).Info("skipping ExternalSecret, ClusterSecretStore feature is disabled")
