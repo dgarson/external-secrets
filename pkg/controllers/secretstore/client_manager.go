@@ -18,6 +18,7 @@ package secretstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
+	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
 )
 
 const (
@@ -103,38 +105,58 @@ func (m *Manager) GetFromStore(ctx context.Context, store esv1.GenericStore, nam
 	return secretClient, nil
 }
 
-// Get returns a provider client from the given storeRef or sourceRef.secretStoreRef
+// Get returns a provider client and metrics observer function from the given storeRef or sourceRef.secretStoreRef
 // while sourceRef.SecretStoreRef takes precedence over storeRef.
-// Do not close the client returned from this func, instead close
-// the manager once you're done with recinciling the external secret.
-func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespace string, sourceRef *esv1.StoreGeneratorSourceRef) (esv1.SecretsClient, error) {
+// The observer function can be used to track API calls by SecretStore dimension when granular metrics are enabled.
+// Do not close the client returned from this func, instead close the manager once you're done with reconciling.
+func (m *Manager) Get(ctx context.Context, storeRef esv1.SecretStoreRef, namespace string, sourceRef *esv1.StoreGeneratorSourceRef) (esv1.SecretsClient, func(string, error), error) {
 	if sourceRef != nil && sourceRef.SecretStoreRef != nil {
 		storeRef = *sourceRef.SecretStoreRef
 	}
 	store, err := m.getStore(ctx, &storeRef, namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// check if store should be handled by this controller instance
 	if !ShouldProcessStore(store, m.controllerClass) {
-		return nil, errors.New("can not reference unmanaged store")
+		return nil, nil, errors.New("can not reference unmanaged store")
 	}
 	// when using ClusterSecretStore, validate the ClusterSecretStore namespace conditions
 	shouldProcess, err := m.shouldProcessSecret(store, namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !shouldProcess {
-		return nil, fmt.Errorf(errClusterStoreMismatch, store.GetName(), namespace)
+		return nil, nil, fmt.Errorf(errClusterStoreMismatch, store.GetName(), namespace)
 	}
 
 	if m.enableFloodgate {
 		err := assertStoreIsUsable(store)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return m.GetFromStore(ctx, store, namespace)
+
+	client, err := m.GetFromStore(ctx, store, namespace)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create metrics observer function
+	providerType := getProviderName(store)
+	observe := ctrlmetrics.NewStoreMetricsObserver(
+		store.GetName(),
+		func() string {
+			if store.GetNamespace() == "" {
+				return "ClusterSecretStore"
+			}
+			return "SecretStore"
+		}(),
+		store.GetNamespace(),
+		providerType,
+	)
+
+	return client, observe, nil
 }
 
 // returns a previously stored client from the cache if store and store-version match
@@ -284,4 +306,35 @@ func assertStoreIsUsable(store esv1.GenericStore) error {
 		return fmt.Errorf(errSecretStoreNotReady, store.GetKind(), store.GetName())
 	}
 	return nil
+}
+
+// getProviderName returns the provider name from the generic store.
+// Returns empty string on error since this is only used for metrics labels.
+func getProviderName(s esv1.GenericStore) string {
+	if s == nil {
+		return ""
+	}
+	spec := s.GetSpec()
+	if spec == nil {
+		return ""
+	}
+
+	// Use JSON marshaling to determine which provider field is set
+	// This matches the logic in apis/externalsecrets/v1/provider_schema.go
+	storeBytes, err := json.Marshal(spec.Provider)
+	if err != nil || storeBytes == nil {
+		return ""
+	}
+
+	storeMap := make(map[string]any)
+	if err := json.Unmarshal(storeBytes, &storeMap); err != nil {
+		return ""
+	}
+
+	// Return the first (and should be only) key
+	for k := range storeMap {
+		return k
+	}
+
+	return ""
 }

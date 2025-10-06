@@ -11,38 +11,92 @@ If you are using a different monitoring tool that also needs a `/metrics` endpoi
 
 The Operator has [the controller-runtime metrics inherited from kubebuilder](https://book.kubebuilder.io/reference/metrics-reference.html) plus some custom metrics with a resource name prefix, such as `externalsecret_`.
 
+## Granular Metrics
+
+By default, metrics include basic labels like `name` and `namespace`. The `--enable-granular-metrics` flag adds additional labels to help identify performance bottlenecks and failures at a more granular level:
+
+**Added Labels:**
+- `secretstore_name` / `secretstore_namespace`: Identifies which SecretStore/ClusterSecretStore is associated with the resource
+- `provider_type`: Identifies the provider type (e.g., "vault", "aws", "gcpsm") for SecretStore metrics
+
+**Affected Metrics:**
+- All ExternalSecret metrics (including `externalsecret_store_api_calls_count` for per-store provider API tracking)
+- All PushSecret metrics
+- All ClusterExternalSecret metrics (secretstore_name only)
+- All ClusterPushSecret metrics (secretstore_name only)
+- All SecretStore/ClusterSecretStore metrics
+
+**Provider API Call Metrics:**
+
+ESO provides two complementary metrics for tracking provider API calls:
+
+| Metric | Scope | Cardinality | Use Case |
+|--------|-------|-------------|----------|
+| `externalsecret_provider_api_calls_count` | **All API calls** including internal provider operations (auth, retries, token refresh) | Low (always enabled) | Overall provider health, total API usage |
+| `externalsecret_store_api_calls_count` | **Controller-initiated operations only** (GetSecret, PushSecret, Validate, etc.) | High (requires `--enable-granular-metrics`) | Per-SecretStore troubleshooting, tenant attribution |
+
+**Important:** `store_api_calls_count` intentionally undercounts vs `provider_api_calls_count` because it only tracks operations initiated by controllers. It does NOT include:
+- Provider authentication/token refresh calls
+- Internal retries within provider code
+- Multi-step operations (e.g., Vault metadata fetch + secret fetch counted as 1)
+
+**When to use each:**
+- **Debugging total API usage**: Use `provider_api_calls_count`
+- **Identifying which SecretStore is causing issues**: Use `store_api_calls_count` (when granular metrics enabled)
+
+**⚠️ Cardinality Warning:**
+Enabling granular metrics increases metric cardinality. In large deployments, this can significantly impact Prometheus performance and storage:
+- **Cardinality multiplier**: ~(number of resources × number of SecretStores) for ExternalSecret/PushSecret metrics
+- **Cardinality multiplier**: ~(number of SecretStores × number of provider types) for SecretStore metrics
+
+**When to enable:**
+- ✅ Debugging specific SecretStore performance issues
+- ✅ Multi-tenant deployments needing per-store observability
+- ✅ Environments with <100 SecretStores and adequate Prometheus capacity
+- ❌ Very large deployments (1000+ ExternalSecrets/SecretStores)
+- ❌ Prometheus clusters with limited capacity
+
 ## Cluster External Secret Metrics
-| Name                                       | Type  | Description                                                |
-|--------------------------------------------|-------|------------------------------------------------------------|
-| `clusterexternalsecret_status_condition`   | Gauge | The status condition of a specific Cluster External Secret |
-| `clusterexternalsecret_reconcile_duration` | Gauge | The duration time to reconcile the Cluster External Secret |
+| Name                                       | Type  | Description                                                | Granular Labels¹              |
+|--------------------------------------------|-------|------------------------------------------------------------|-----------------------------|
+| `clusterexternalsecret_status_condition`   | Gauge | The status condition of a specific Cluster External Secret | `secretstore_name`          |
+| `clusterexternalsecret_reconcile_duration` | Gauge | The duration time to reconcile the Cluster External Secret | `secretstore_name`          |
 
 ## External Secret Metrics
-| Name                                           | Type      | Description                                                                                                                                                                                                             |
-|------------------------------------------------|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `externalsecret_provider_api_calls_count`      | Counter   | Number of API calls made to an upstream secret provider API. The metric provides a `provider`, `call` and `status` labels.                                                                                              |
-| `externalsecret_sync_calls_total`              | Counter   | Total number of the External Secret sync calls                                                                                                                                                                          |
-| `externalsecret_sync_calls_error`              | Counter   | Total number of the External Secret sync errors                                                                                                                                                                         |
-| `externalsecret_status_condition`              | Gauge     | The status condition of a specific External Secret                                                                                                                                                                      |
-| `externalsecret_reconcile_duration`            | Gauge     | The duration time to reconcile the External Secret                                                                                                                                                                      |
+| Name                                           | Type      | Description                                                                                                                                                                                                             | Granular Labels¹                              |
+|------------------------------------------------|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------|
+| `externalsecret_provider_api_calls_count`      | Counter   | Number of API calls made to an upstream secret provider API. The metric provides a `provider`, `call` and `status` labels.                                                                                              | -                                           |
+| `externalsecret_store_api_calls_count`         | Counter   | Number of controller-initiated API calls to secret providers, aggregated by SecretStore. Provides `provider`, `call`, and `status` labels.                                                                             | `secretstore_kind`, `secretstore_name`, `secretstore_namespace` |
+| `externalsecret_sync_calls_total`              | Counter   | Total number of the External Secret sync calls                                                                                                                                                                          | `secretstore_name`, `secretstore_namespace` |
+| `externalsecret_sync_calls_error`              | Counter   | Total number of the External Secret sync errors                                                                                                                                                                         | `secretstore_name`, `secretstore_namespace` |
+| `externalsecret_status_condition`              | Gauge     | The status condition of a specific External Secret                                                                                                                                                                      | `secretstore_name`, `secretstore_namespace` |
+| `externalsecret_reconcile_duration`            | Gauge     | The duration time to reconcile the External Secret                                                                                                                                                                      | `secretstore_name`, `secretstore_namespace` |
 
 ## Push Secret Metrics
-| Name                                    | Type  | Description                                             |
-|-----------------------------------------|-------|---------------------------------------------------------|
-| `pushsecret_status_condition`   | Gauge | The status condition of a specific Push Secret |
-| `pushsecret_reconcile_duration` | Gauge | The duration time to reconcile the Push Secret |
+| Name                                    | Type  | Description                                             | Granular Labels¹                              |
+|-----------------------------------------|-------|--------------------------------------------------------|---------------------------------------------|
+| `pushsecret_status_condition`   | Gauge | The status condition of a specific Push Secret | `secretstore_name`, `secretstore_namespace` |
+| `pushsecret_reconcile_duration` | Gauge | The duration time to reconcile the Push Secret | `secretstore_name`, `secretstore_namespace` |
+
+## Cluster Push Secret Metrics
+| Name                                          | Type  | Description                                                   | Granular Labels¹       |
+|-----------------------------------------------|-------|---------------------------------------------------------------|----------------------|
+| `clusterpushsecret_status_condition`          | Gauge | The status condition of a specific Cluster Push Secret       | `secretstore_name`   |
+| `clusterpushsecret_reconcile_duration`        | Gauge | The duration time to reconcile the Cluster Push Secret       | `secretstore_name`   |
 
 ## Cluster Secret Store Metrics
-| Name                                    | Type  | Description                                             |
-|-----------------------------------------|-------|---------------------------------------------------------|
-| `clustersecretstore_status_condition`   | Gauge | The status condition of a specific Cluster Secret Store |
-| `clustersecretstore_reconcile_duration` | Gauge | The duration time to reconcile the Cluster Secret Store |
+| Name                                    | Type  | Description                                             | Granular Labels¹  |
+|-----------------------------------------|-------|---------------------------------------------------------|-----------------|
+| `clustersecretstore_status_condition`   | Gauge | The status condition of a specific Cluster Secret Store | `provider_type` |
+| `clustersecretstore_reconcile_duration` | Gauge | The duration time to reconcile the Cluster Secret Store | `provider_type` |
 
-# Secret Store Metrics
-| Name                             | Type  | Description                                     |
-|----------------------------------|-------|-------------------------------------------------|
-| `secretstore_status_condition`   | Gauge | The status condition of a specific Secret Store |
-| `secretstore_reconcile_duration` | Gauge | The duration time to reconcile the Secret Store |
+## Secret Store Metrics
+| Name                             | Type  | Description                                     | Granular Labels¹  |
+|----------------------------------|-------|-------------------------------------------------|-----------------|
+| `secretstore_status_condition`   | Gauge | The status condition of a specific Secret Store | `provider_type` |
+| `secretstore_reconcile_duration` | Gauge | The duration time to reconcile the Secret Store | `provider_type` |
+
+¹ These additional labels are only present when `--enable-granular-metrics=true`
 
 ## Controller Runtime Metrics
 See [the kubebuilder documentation](https://book.kubebuilder.io/reference/metrics-reference.html) on the default exported metrics by controller-runtime.

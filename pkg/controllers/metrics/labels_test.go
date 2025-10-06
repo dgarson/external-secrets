@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -197,5 +198,390 @@ func TestRefineLabels(t *testing.T) {
 				t.Errorf("Refinement does not match the expected value. (-got +want)\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestStoreMetricsObserver(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	origCallback := observeStoreAPICallFunc
+	defer func() {
+		EnableGranularMetrics = origEnabled
+		observeStoreAPICallFunc = origCallback
+	}()
+
+	testCases := []struct {
+		description         string
+		enableGranular      bool
+		storeName           string
+		storeKind           string
+		storeNamespace      string
+		providerType        string
+		operation           string
+		err                 error
+		setupCallback       bool
+		expectedCallbackRun bool
+	}{
+		{
+			description:         "Granular metrics disabled - returns no-op function",
+			enableGranular:      false,
+			storeName:           "test-store",
+			storeKind:           "SecretStore",
+			storeNamespace:      "default",
+			providerType:        "vault",
+			operation:           OperationGetSecret,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: false,
+		},
+		{
+			description:         "Granular metrics enabled - SecretStore",
+			enableGranular:      true,
+			storeName:           "test-store",
+			storeKind:           "SecretStore",
+			storeNamespace:      "default",
+			providerType:        "vault",
+			operation:           OperationGetSecret,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: true,
+		},
+		{
+			description:         "Granular metrics enabled - ClusterSecretStore",
+			enableGranular:      true,
+			storeName:           "cluster-store",
+			storeKind:           "ClusterSecretStore",
+			storeNamespace:      "",
+			providerType:        "aws",
+			operation:           OperationPushSecret,
+			err:                 nil,
+			setupCallback:       true,
+			expectedCallbackRun: true,
+		},
+		{
+			description:         "No callback set - function doesn't panic",
+			enableGranular:      true,
+			storeName:           "test-store",
+			storeKind:           "SecretStore",
+			storeNamespace:      "default",
+			providerType:        "vault",
+			operation:           OperationValidate,
+			err:                 nil,
+			setupCallback:       false,
+			expectedCallbackRun: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			EnableGranularMetrics = tc.enableGranular
+
+			callbackRun := false
+			var capturedStoreName, capturedStoreKind, capturedNamespace, capturedProvider, capturedOperation string
+			var capturedErr error
+
+			if tc.setupCallback {
+				observeStoreAPICallFunc = func(storeName, storeKind, storeNamespace, provider, call string, err error) {
+					callbackRun = true
+					capturedStoreName = storeName
+					capturedStoreKind = storeKind
+					capturedNamespace = storeNamespace
+					capturedProvider = provider
+					capturedOperation = call
+					capturedErr = err
+				}
+			} else {
+				observeStoreAPICallFunc = nil
+			}
+
+			// Create observer and execute
+			observe := NewStoreMetricsObserver(tc.storeName, tc.storeKind, tc.storeNamespace, tc.providerType)
+			observe(tc.operation, tc.err)
+
+			// Verify
+			if callbackRun != tc.expectedCallbackRun {
+				t.Errorf("Expected callback run=%v, got=%v", tc.expectedCallbackRun, callbackRun)
+			}
+
+			if tc.expectedCallbackRun {
+				if capturedStoreName != tc.storeName {
+					t.Errorf("Expected storeName=%q, got=%q", tc.storeName, capturedStoreName)
+				}
+				if capturedStoreKind != tc.storeKind {
+					t.Errorf("Expected storeKind=%q, got=%q", tc.storeKind, capturedStoreKind)
+				}
+				if capturedNamespace != tc.storeNamespace {
+					t.Errorf("Expected namespace=%q, got=%q", tc.storeNamespace, capturedNamespace)
+				}
+				if capturedProvider != tc.providerType {
+					t.Errorf("Expected provider=%q, got=%q", tc.providerType, capturedProvider)
+				}
+				if capturedOperation != tc.operation {
+					t.Errorf("Expected operation=%q, got=%q", tc.operation, capturedOperation)
+				}
+				if !errors.Is(capturedErr, tc.err) {
+					t.Errorf("Expected err=%v, got=%v", tc.err, capturedErr)
+				}
+			}
+		})
+	}
+}
+
+func TestNewStoreMetricsObserver(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	defer func() {
+		EnableGranularMetrics = origEnabled
+	}()
+
+	t.Run("Returns non-nil function when granular metrics enabled", func(t *testing.T) {
+		EnableGranularMetrics = true
+		observe := NewStoreMetricsObserver("my-store", "SecretStore", "default", "vault")
+
+		if observe == nil {
+			t.Fatal("Expected non-nil observer function")
+		}
+	})
+
+	t.Run("Returns non-nil no-op function when granular metrics disabled", func(t *testing.T) {
+		EnableGranularMetrics = false
+		observe := NewStoreMetricsObserver("my-store", "SecretStore", "default", "vault")
+
+		if observe == nil {
+			t.Fatal("Expected non-nil observer function (no-op)")
+		}
+
+		// Should not panic when called
+		observe(OperationGetSecret, nil)
+	})
+}
+
+func TestWithGranularLabels(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	defer func() {
+		EnableGranularMetrics = origEnabled
+	}()
+
+	baseLabels := []string{"provider", "call", "status"}
+
+	t.Run("Granular metrics disabled - returns only base labels", func(t *testing.T) {
+		EnableGranularMetrics = false
+		result := WithGranularLabels(baseLabels, "extra1", "extra2")
+
+		expectedLabels := []string{"provider", "call", "status"}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Granular metrics enabled - returns base + granular labels", func(t *testing.T) {
+		EnableGranularMetrics = true
+		result := WithGranularLabels(baseLabels, "extra1", "extra2")
+
+		expectedLabels := []string{"provider", "call", "status", "extra1", "extra2"}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Returns copy to prevent mutation", func(t *testing.T) {
+		EnableGranularMetrics = true
+		result1 := WithGranularLabels(baseLabels, "extra1")
+		result2 := WithGranularLabels(baseLabels, "extra2")
+
+		// Modify result1
+		result1[0] = "modified"
+
+		// result2 should not be affected
+		if result2[0] == "modified" {
+			t.Error("Modifying one result affected another - slice was not copied properly")
+		}
+
+		// baseLabels should not be affected
+		if baseLabels[0] == "modified" {
+			t.Error("Modifying result affected base labels - slice was not copied properly")
+		}
+	})
+}
+
+func TestAddStoreRefLabels(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	defer func() {
+		EnableGranularMetrics = origEnabled
+	}()
+
+	t.Run("Granular metrics disabled - returns original labels", func(t *testing.T) {
+		EnableGranularMetrics = false
+		baseLabels := prometheus.Labels{
+			"provider": "vault",
+			"status":   "success",
+		}
+		result := AddStoreRefLabels(baseLabels, "my-store", "SecretStore", "default")
+
+		expectedLabels := prometheus.Labels{
+			"provider": "vault",
+			"status":   "success",
+		}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Granular metrics enabled - SecretStore adds store labels with namespace", func(t *testing.T) {
+		EnableGranularMetrics = true
+		// Base labels must have the keys already present (as they would from RefineConditionMetricLabels)
+		baseLabels := prometheus.Labels{
+			"provider":              "vault",
+			"status":                "success",
+			"secretstore_name":      "",
+			"secretstore_namespace": "",
+		}
+		result := AddStoreRefLabels(baseLabels, "my-store", "SecretStore", "default")
+
+		expectedLabels := prometheus.Labels{
+			"provider":              "vault",
+			"status":                "success",
+			"secretstore_name":      "my-store",
+			"secretstore_namespace": "default",
+		}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Granular metrics enabled - ClusterSecretStore adds store labels with empty namespace", func(t *testing.T) {
+		EnableGranularMetrics = true
+		// Base labels must have the keys already present
+		baseLabels := prometheus.Labels{
+			"provider":              "vault",
+			"status":                "success",
+			"secretstore_name":      "",
+			"secretstore_namespace": "",
+		}
+		result := AddStoreRefLabels(baseLabels, "cluster-store", "ClusterSecretStore", "default")
+
+		expectedLabels := prometheus.Labels{
+			"provider":              "vault",
+			"status":                "success",
+			"secretstore_name":      "cluster-store",
+			"secretstore_namespace": "",
+		}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+}
+
+func TestAddProviderTypeLabel(t *testing.T) {
+	// Save original state
+	origEnabled := EnableGranularMetrics
+	defer func() {
+		EnableGranularMetrics = origEnabled
+	}()
+
+	t.Run("Granular metrics disabled - returns original labels", func(t *testing.T) {
+		EnableGranularMetrics = false
+		baseLabels := prometheus.Labels{
+			"name":      "test-es",
+			"namespace": "default",
+		}
+		result := AddProviderTypeLabel(baseLabels, "vault")
+
+		expectedLabels := prometheus.Labels{
+			"name":      "test-es",
+			"namespace": "default",
+		}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Granular metrics enabled - adds provider_type label", func(t *testing.T) {
+		EnableGranularMetrics = true
+		// Base labels must have the provider_type key already present
+		baseLabels := prometheus.Labels{
+			"name":          "test-es",
+			"namespace":     "default",
+			"provider_type": "",
+		}
+		result := AddProviderTypeLabel(baseLabels, "vault")
+
+		expectedLabels := prometheus.Labels{
+			"name":          "test-es",
+			"namespace":     "default",
+			"provider_type": "vault",
+		}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("Granular metrics enabled but empty provider - returns original labels", func(t *testing.T) {
+		EnableGranularMetrics = true
+		baseLabels := prometheus.Labels{
+			"name":          "test-es",
+			"namespace":     "default",
+			"provider_type": "",
+		}
+		result := AddProviderTypeLabel(baseLabels, "")
+
+		expectedLabels := prometheus.Labels{
+			"name":          "test-es",
+			"namespace":     "default",
+			"provider_type": "",
+		}
+		if diff := cmp.Diff(result, expectedLabels); diff != "" {
+			t.Errorf("Labels don't match (-got +want)\n%s", diff)
+		}
+	})
+}
+
+func TestSetObserveStoreAPICallFunc(t *testing.T) {
+	// Save original state
+	origCallback := observeStoreAPICallFunc
+	defer func() {
+		observeStoreAPICallFunc = origCallback
+	}()
+
+	callbackCalled := false
+	var capturedStoreName, capturedStoreKind, capturedNamespace, capturedProvider, capturedOperation string
+
+	testCallback := func(storeName, storeKind, storeNamespace, provider, call string, err error) {
+		callbackCalled = true
+		capturedStoreName = storeName
+		capturedStoreKind = storeKind
+		capturedNamespace = storeNamespace
+		capturedProvider = provider
+		capturedOperation = call
+	}
+
+	SetObserveStoreAPICallFunc(testCallback)
+
+	// Verify callback was set by calling it
+	if observeStoreAPICallFunc == nil {
+		t.Fatal("Expected observeStoreAPICallFunc to be set")
+	}
+
+	observeStoreAPICallFunc("test-store", "SecretStore", "default", "vault", "GetSecret", nil)
+
+	if !callbackCalled {
+		t.Error("Expected callback to be called")
+	}
+	if capturedStoreName != "test-store" {
+		t.Errorf("Expected storeName=test-store, got=%s", capturedStoreName)
+	}
+	if capturedStoreKind != "SecretStore" {
+		t.Errorf("Expected storeKind=SecretStore, got=%s", capturedStoreKind)
+	}
+	if capturedNamespace != "default" {
+		t.Errorf("Expected namespace=default, got=%s", capturedNamespace)
+	}
+	if capturedProvider != "vault" {
+		t.Errorf("Expected provider=vault, got=%s", capturedProvider)
+	}
+	if capturedOperation != "GetSecret" {
+		t.Errorf("Expected operation=GetSecret, got=%s", capturedOperation)
 	}
 }

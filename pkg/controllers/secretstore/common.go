@@ -34,6 +34,7 @@ import (
 
 	esapi "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	esv1alpha1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1alpha1"
+	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/metrics"
 
 	_ "github.com/external-secrets/external-secrets/pkg/provider/register"
@@ -158,7 +159,23 @@ func validateStore(ctx context.Context, namespace, controllerClass string, store
 		recorder.Event(store, v1.EventTypeWarning, esapi.ReasonInvalidProviderConfig, err.Error())
 		return fmt.Errorf(errStoreClient, err)
 	}
+
+	// Create metrics observer for store API calls
+	providerType := getProviderName(store)
+	observe := ctrlmetrics.NewStoreMetricsObserver(
+		store.GetName(),
+		func() string {
+			if store.GetNamespace() == "" {
+				return "ClusterSecretStore"
+			}
+			return "SecretStore"
+		}(),
+		store.GetNamespace(),
+		providerType,
+	)
+
 	validationResult, err := cl.Validate()
+	observe(ctrlmetrics.OperationValidate, err)
 	if err != nil {
 		if validationResult == esapi.ValidationResultUnknown {
 			cond := NewSecretStoreCondition(esapi.SecretStoreReady, v1.ConditionTrue, esapi.ReasonValidationUnknown, errValidationUnknown)
