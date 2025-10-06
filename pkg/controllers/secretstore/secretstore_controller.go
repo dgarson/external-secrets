@@ -69,11 +69,6 @@ func (r *StoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 
-	// Add provider_type label if granular metrics is enabled
-	if providerName, err := esapi.GetProviderName(&ss); err == nil {
-		resourceLabels = ctrlmetrics.AddProviderTypeLabel(resourceLabels, providerName)
-	}
-
 	return reconcile(ctx, req, &ss, r.Client, r.PushSecretEnabled, log, Opts{
 		ControllerClass: r.ControllerClass,
 		GaugeVecGetter:  ssmetrics.GetGaugeVec,
