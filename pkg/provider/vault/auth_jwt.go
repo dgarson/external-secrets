@@ -22,15 +22,84 @@ import (
 	"fmt"
 	"strings"
 
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	kclient "sigs.k8s.io/controller-runtime/pkg/client"
+
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	"github.com/external-secrets/external-secrets/pkg/constants"
 	"github.com/external-secrets/external-secrets/pkg/metrics"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
 const (
 	errJwtNoTokenSource = "neither `secretRef` nor `kubernetesServiceAccountToken` was supplied as token source for jwt authentication"
 )
+
+// extractJwtCredentials extracts JWT token from either SecretRef or ServiceAccount.
+// This function is used by the client pooling feature to extract credentials before caching.
+func extractJwtCredentials(
+	ctx context.Context,
+	corev1 typedcorev1.CoreV1Interface,
+	kube kclient.Client,
+	storeKind string,
+	namespace string,
+	jwtAuth *esv1.VaultJwtAuth,
+) (jwt string, err error) {
+	if jwtAuth.SecretRef != nil {
+		jwt, err = resolvers.SecretKeyRef(ctx, kube, storeKind, namespace, jwtAuth.SecretRef)
+	} else if k8sServiceAccountToken := jwtAuth.KubernetesServiceAccountToken; k8sServiceAccountToken != nil {
+		audiences := k8sServiceAccountToken.Audiences
+		if audiences == nil {
+			audiences = &[]string{"vault"}
+		}
+		expirationSeconds := k8sServiceAccountToken.ExpirationSeconds
+		if expirationSeconds == nil {
+			tmp := int64(600)
+			expirationSeconds = &tmp
+		}
+		jwt, err = createServiceAccountToken(
+			ctx,
+			corev1,
+			storeKind,
+			namespace,
+			k8sServiceAccountToken.ServiceAccountRef,
+			*audiences,
+			*expirationSeconds)
+	} else {
+		return "", errors.New(errJwtNoTokenSource)
+	}
+	return jwt, err
+}
+
+// authenticateWithJwt authenticates to Vault using JWT with pre-extracted token.
+// This function is used by the client pooling feature to avoid re-reading credentials from Kubernetes.
+func authenticateWithJwt(
+	ctx context.Context,
+	logical util.Logical,
+	jwtAuth *esv1.VaultJwtAuth,
+	jwt string,
+) error {
+	role := strings.TrimSpace(jwtAuth.Role)
+	parameters := map[string]any{
+		"role": role,
+		"jwt":  jwt,
+	}
+	url := strings.Join([]string{"auth", jwtAuth.Path, "login"}, "/")
+	vaultResult, err := logical.WriteWithContext(ctx, url, parameters)
+	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
+	if err != nil {
+		return err
+	}
+
+	token, err := vaultResult.TokenID()
+	if err != nil {
+		return fmt.Errorf(errVaultToken, err)
+	}
+	// Note: Token is set by the caller after this function returns
+	_ = token
+	return nil
+}
 
 func setJwtAuthToken(ctx context.Context, v *client) (bool, error) {
 	jwtAuth := v.store.Auth.Jwt

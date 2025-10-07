@@ -60,49 +60,76 @@ func setIamAuthToken(ctx context.Context, v *client, jwtProvider util.JwtProvide
 	return false, nil
 }
 
-func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.VaultIamAuth, isClusterKind bool, k kclient.Client, n string, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) error {
+// extractIAMCredentials extracts AWS credentials from the configured source.
+// Returns credentials or nil if using pod identity.
+func extractIAMCredentials(
+	ctx context.Context,
+	iamAuth *esv1.VaultIamAuth,
+	isClusterKind bool,
+	kube kclient.Client,
+	namespace string,
+	region string,
+	jwtProvider util.JwtProviderFactory,
+	getControllerPodCreds func(context.Context, string, kclient.Client, util.JwtProviderFactory) (*credentials.Credentials, error),
+) (*credentials.Credentials, error) {
 	jwtAuth := iamAuth.JWTAuth
 	secretRefAuth := iamAuth.SecretRef
-	regionAWS := c.getRegionOrDefault(iamAuth.Region)
-	awsAuthMountPath := c.getAuthMountPathOrDefault(iamAuth.Path)
 
 	var creds *credentials.Credentials
 	var err error
-	if jwtAuth != nil { // use credentials from a sa explicitly defined and referenced. Highest preference is given to this method/configuration.
-		creds, err = vaultiamauth.CredsFromServiceAccount(ctx, *iamAuth, regionAWS, isClusterKind, k, n, jwtProvider)
+
+	if jwtAuth != nil {
+		// Use credentials from a ServiceAccount explicitly defined and referenced
+		creds, err = vaultiamauth.CredsFromServiceAccount(ctx, *iamAuth, region, isClusterKind, kube, namespace, jwtProvider)
 		if err != nil {
-			return err
+			return nil, err
 		}
-	} else if secretRefAuth != nil { // if jwtAuth is not defined, check if secretRef is defined. Second preference.
+	} else if secretRefAuth != nil {
+		// Use credentials from SecretRef
 		logger.V(1).Info("using credentials from secretRef")
-		creds, err = vaultiamauth.CredsFromSecretRef(ctx, *iamAuth, c.storeKind, k, n)
+		storeKind := esv1.SecretStoreKind
+		if isClusterKind {
+			storeKind = esv1.ClusterSecretStoreKind
+		}
+		creds, err = vaultiamauth.CredsFromSecretRef(ctx, *iamAuth, storeKind, kube, namespace)
 		if err != nil {
-			return err
+			return nil, err
+		}
+	} else {
+		// Default to controller pod's identity
+		creds, err = getControllerPodCreds(ctx, region, kube, jwtProvider)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	// Neither of jwtAuth or secretRefAuth defined. Last preference.
-	// Default to controller pod's identity
-	if jwtAuth == nil && secretRefAuth == nil {
-		creds, err = c.getControllerPodCredentials(ctx, regionAWS, k, jwtProvider)
-		if err != nil {
-			return err
-		}
-	}
+	return creds, nil
+}
 
+// authenticateWithIAM performs IAM-based authentication with Vault.
+func authenticateWithIAM(
+	ctx context.Context,
+	auth util.Auth,
+	iamAuth *esv1.VaultIamAuth,
+	region string,
+	awsAuthMountPath string,
+	creds *credentials.Credentials,
+	assumeRoler vaultiamauth.STSProvider,
+) error {
 	config := aws.NewConfig().WithEndpointResolver(vaultiamauth.ResolveEndpoint())
 	if creds != nil {
 		config.WithCredentials(creds)
 	}
 
-	if regionAWS != "" {
-		config.WithRegion(regionAWS)
+	if region != "" {
+		config.WithRegion(region)
 	}
 
 	sess, err := vaultiamauth.GetAWSSession(config)
 	if err != nil {
 		return err
 	}
+
 	if iamAuth.AWSIAMRole != "" {
 		stsclient := assumeRoler(sess)
 		if iamAuth.ExternalID != "" {
@@ -119,6 +146,7 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	if err != nil {
 		return err
 	}
+
 	// Set environment variables. These would be fetched by Login
 	_ = os.Setenv("AWS_ACCESS_KEY_ID", getCreds.AccessKeyID)
 	_ = os.Setenv("AWS_SECRET_ACCESS_KEY", getCreds.SecretAccessKey)
@@ -127,23 +155,65 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	var awsAuthClient *authaws.AWSAuth
 
 	if iamAuth.VaultAWSIAMServerID != "" {
-		awsAuthClient, err = authaws.NewAWSAuth(authaws.WithRegion(regionAWS), authaws.WithIAMAuth(), authaws.WithRole(iamAuth.Role), authaws.WithMountPath(awsAuthMountPath), authaws.WithIAMServerIDHeader(iamAuth.VaultAWSIAMServerID))
+		awsAuthClient, err = authaws.NewAWSAuth(
+			authaws.WithRegion(region),
+			authaws.WithIAMAuth(),
+			authaws.WithRole(iamAuth.Role),
+			authaws.WithMountPath(awsAuthMountPath),
+			authaws.WithIAMServerIDHeader(iamAuth.VaultAWSIAMServerID),
+		)
 		if err != nil {
 			return err
 		}
 	} else {
-		awsAuthClient, err = authaws.NewAWSAuth(authaws.WithRegion(regionAWS), authaws.WithIAMAuth(), authaws.WithRole(iamAuth.Role), authaws.WithMountPath(awsAuthMountPath))
+		awsAuthClient, err = authaws.NewAWSAuth(
+			authaws.WithRegion(region),
+			authaws.WithIAMAuth(),
+			authaws.WithRole(iamAuth.Role),
+			authaws.WithMountPath(awsAuthMountPath),
+		)
 		if err != nil {
 			return err
 		}
 	}
 
-	_, err = c.auth.Login(ctx, awsAuthClient)
+	_, err = auth.Login(ctx, awsAuthClient)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.VaultIamAuth, isClusterKind bool, k kclient.Client, n string, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) error {
+	regionAWS := c.getRegionOrDefault(iamAuth.Region)
+	awsAuthMountPath := c.getAuthMountPathOrDefault(iamAuth.Path)
+
+	// Extract credentials
+	creds, err := extractIAMCredentials(
+		ctx,
+		iamAuth,
+		isClusterKind,
+		k,
+		n,
+		regionAWS,
+		jwtProvider,
+		c.getControllerPodCredentials,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Authenticate
+	return authenticateWithIAM(
+		ctx,
+		c.auth,
+		iamAuth,
+		regionAWS,
+		awsAuthMountPath,
+		creds,
+		assumeRoler,
+	)
 }
 
 func (c *client) getRegionOrDefault(region string) string {
