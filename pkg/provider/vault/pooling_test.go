@@ -226,12 +226,12 @@ func TestExtractCredentialsServiceAccount(t *testing.T) {
 // TestClientPoolKeyString verifies that the String() method produces stable, deterministic output.
 func TestClientPoolKeyString(t *testing.T) {
 	key := ClientPoolKey{
-		Server:             "https://vault.example.com",
-		Namespace:          ptr.To("test-ns"),
-		AuthMethod:         "approle",
-		AuthPath:           "approle",
-		CredentialIdentity: "roleID:test-role|rv:12345",
-		ReadYourWrites:     true,
+		Server:              "https://vault.example.com",
+		Namespace:           ptr.To("test-ns"),
+		AuthMethod:          "approle",
+		AuthPath:            "approle",
+		CredentialIdentity:  "roleID:test-role|rv:12345",
+		ReadYourWrites:      true,
 		ForwardInconsistent: false,
 		Headers: map[string]string{
 			"X-Custom": "value",

@@ -23,8 +23,8 @@ import (
 
 	authkubernetes "github.com/hashicorp/vault/api/auth/kubernetes"
 	corev1 "k8s.io/api/core/v1"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
