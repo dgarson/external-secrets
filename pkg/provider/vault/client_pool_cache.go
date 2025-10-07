@@ -46,8 +46,7 @@ type CachingClientPool struct {
 	newVaultClient func(config *vault.Config) (util.Client, error)
 
 	// Configuration for CachedClient creation
-	rotationThresholdPercent int
-	tokenOperationTimeout    time.Duration
+	tokenOperationTimeout time.Duration
 
 	// Client index for reverse lookup (client -> CachedClient)
 	indexMu     sync.RWMutex
@@ -61,9 +60,8 @@ type CachingClientPool struct {
 type CachingClientPoolConfig struct {
 	NewVaultClient func(config *vault.Config) (util.Client, error)
 
-	RotationThresholdPercent int
-	TokenOperationTimeout    time.Duration
-	MaxCacheSize             int
+	TokenOperationTimeout time.Duration
+	MaxCacheSize          int
 
 	// Optional callback invoked when a client is evicted from the cache.
 	// This is called with the Vault server address of the evicted client.
@@ -76,9 +74,6 @@ func NewCachingClientPool(config CachingClientPoolConfig) (*CachingClientPool, e
 	if config.NewVaultClient == nil {
 		config.NewVaultClient = NewVaultClient
 	}
-	if config.RotationThresholdPercent == 0 {
-		config.RotationThresholdPercent = 50
-	}
 	if config.MaxCacheSize == 0 {
 		config.MaxCacheSize = 1000
 	}
@@ -87,11 +82,10 @@ func NewCachingClientPool(config CachingClientPoolConfig) (*CachingClientPool, e
 	}
 
 	pool := &CachingClientPool{
-		newVaultClient:           config.NewVaultClient,
-		rotationThresholdPercent: config.RotationThresholdPercent,
-		tokenOperationTimeout:    config.TokenOperationTimeout,
-		onClientEvicted:          config.OnClientEvicted,
-		clientIndex:              make(map[util.Client]*CachedClient),
+		newVaultClient:        config.NewVaultClient,
+		tokenOperationTimeout: config.TokenOperationTimeout,
+		onClientEvicted:       config.OnClientEvicted,
+		clientIndex:           make(map[util.Client]*CachedClient),
 	}
 
 	cache, err := lru.NewWithEvict(config.MaxCacheSize, func(key string, managed *CachedClient) {
@@ -190,8 +184,7 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 					p.mu.Unlock()
 				},
 			},
-			RotationThresholdPercent: p.rotationThresholdPercent,
-			TokenOperationTimeout:    p.tokenOperationTimeout,
+			TokenOperationTimeout: p.tokenOperationTimeout,
 		})
 
 		// Add to cache and register for reverse lookup under write lock

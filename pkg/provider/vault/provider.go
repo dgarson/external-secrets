@@ -342,10 +342,9 @@ func initClientPool(enablePooling, enableRenewal bool, renewalThreshold int, ren
 
 		// Layer 2: Create pure caching pool with eviction callback
 		cachingPool, err := NewCachingClientPool(CachingClientPoolConfig{
-			NewVaultClient:           NewVaultClient,
-			RotationThresholdPercent: renewalThreshold,
-			TokenOperationTimeout:    apiTimeout,
-			MaxCacheSize:             cacheSize,
+			NewVaultClient:        NewVaultClient,
+			TokenOperationTimeout: apiTimeout,
+			MaxCacheSize:          cacheSize,
 			// Callback to notify metrics layer when clients are evicted/finalized
 			OnClientEvicted: func(address string) {
 				if metricsPool != nil {
