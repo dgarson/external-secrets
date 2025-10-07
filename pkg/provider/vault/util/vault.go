@@ -18,6 +18,7 @@ package util
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	vault "github.com/hashicorp/vault/api"
@@ -51,6 +52,7 @@ type Client interface {
 	Namespace() string
 	SetNamespace(namespace string)
 	AddHeader(key, value string)
+	Clone() (Client, error)
 }
 
 type VaultClient struct {
@@ -63,6 +65,7 @@ type VaultClient struct {
 	NamespaceFunc    func() string
 	SetNamespaceFunc func(namespace string)
 	AddHeaderFunc    func(key, value string)
+	CloneFunc        func() (Client, error)
 }
 
 func (v VaultClient) AddHeader(key, value string) {
@@ -99,4 +102,11 @@ func (v VaultClient) AuthToken() Token {
 
 func (v VaultClient) Logical() Logical {
 	return v.LogicalField
+}
+
+func (v VaultClient) Clone() (Client, error) {
+	if v.CloneFunc == nil {
+		return nil, fmt.Errorf("CloneFunc not set on VaultClient")
+	}
+	return v.CloneFunc()
 }

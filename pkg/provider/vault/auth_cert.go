@@ -24,16 +24,69 @@ import (
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
+	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	"github.com/external-secrets/external-secrets/pkg/constants"
 	"github.com/external-secrets/external-secrets/pkg/metrics"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
 const (
 	errVaultRequest = "error from Vault request: %w"
 )
+
+// extractCertCredentials reads the client certificate and key from secrets.
+func extractCertCredentials(
+	ctx context.Context,
+	kube kclient.Client,
+	storeKind string,
+	namespace string,
+	certAuth *esv1.VaultCertAuth,
+) (clientCert string, clientKey string, err error) {
+	clientKey, err = resolvers.SecretKeyRef(ctx, kube, storeKind, namespace, &certAuth.SecretRef)
+	if err != nil {
+		return "", "", err
+	}
+
+	clientCert, err = resolvers.SecretKeyRef(ctx, kube, storeKind, namespace, &certAuth.ClientCert)
+	if err != nil {
+		return "", "", err
+	}
+
+	return clientCert, clientKey, nil
+}
+
+// authenticateWithCert performs certificate-based authentication with Vault.
+func authenticateWithCert(
+	ctx context.Context,
+	logical util.Logical,
+	cfg *vault.Config,
+	clientCert string,
+	clientKey string,
+) (token string, err error) {
+	cert, err := tls.X509KeyPair([]byte(clientCert), []byte(clientKey))
+	if err != nil {
+		return "", fmt.Errorf(errClientTLSAuth, err)
+	}
+
+	if transport, ok := cfg.HttpClient.Transport.(*http.Transport); ok {
+		transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	url := strings.Join([]string{"auth", "cert", "login"}, "/")
+	vaultResult, err := logical.WriteWithContext(ctx, url, nil)
+	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
+	if err != nil {
+		return "", fmt.Errorf(errVaultRequest, err)
+	}
+	token, err = vaultResult.TokenID()
+	if err != nil {
+		return "", fmt.Errorf(errVaultToken, err)
+	}
+	return token, nil
+}
 
 func setCertAuthToken(ctx context.Context, v *client, cfg *vault.Config) (bool, error) {
 	certAuth := v.store.Auth.Cert
@@ -48,35 +101,18 @@ func setCertAuthToken(ctx context.Context, v *client, cfg *vault.Config) (bool, 
 }
 
 func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.VaultCertAuth, cfg *vault.Config) error {
-	clientKey, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &certAuth.SecretRef)
+	// Extract credentials
+	clientCert, clientKey, err := extractCertCredentials(ctx, c.kube, c.storeKind, c.namespace, certAuth)
 	if err != nil {
 		return err
 	}
 
-	clientCert, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &certAuth.ClientCert)
+	// Authenticate
+	token, err := authenticateWithCert(ctx, c.logical, cfg, clientCert, clientKey)
 	if err != nil {
 		return err
 	}
 
-	cert, err := tls.X509KeyPair([]byte(clientCert), []byte(clientKey))
-	if err != nil {
-		return fmt.Errorf(errClientTLSAuth, err)
-	}
-
-	if transport, ok := cfg.HttpClient.Transport.(*http.Transport); ok {
-		transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
-	}
-
-	url := strings.Join([]string{"auth", "cert", "login"}, "/")
-	vaultResult, err := c.logical.WriteWithContext(ctx, url, nil)
-	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
-	if err != nil {
-		return fmt.Errorf(errVaultRequest, err)
-	}
-	token, err := vaultResult.TokenID()
-	if err != nil {
-		return fmt.Errorf(errVaultToken, err)
-	}
 	c.client.SetToken(token)
 	return nil
 }
