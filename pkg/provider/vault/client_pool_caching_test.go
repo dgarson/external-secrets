@@ -120,7 +120,7 @@ func TestCachingClientPool_BasicCaching(t *testing.T) {
 			clientCreationCount.Add(1)
 			return fake.ClientWithLoginMock(config)
 		},
-		EnableRenewal: false,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -172,7 +172,7 @@ func TestCachingClientPool_BasicCaching(t *testing.T) {
 func TestCachingClientPool_DifferentCacheKeys(t *testing.T) {
 	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: fake.ClientWithLoginMock,
-		EnableRenewal:  false,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -254,8 +254,7 @@ func TestCachingClientPool_StaticTokenHandling(t *testing.T) {
 
 			return client, nil
 		},
-		EnableRenewal:        true,
-		RenewalCheckInterval: 50 * time.Millisecond,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -307,9 +306,7 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 
 			return client, nil
 		},
-		EnableRenewal:           true,
-		RenewalThresholdPercent: 50, // Since we provide explicit RenewalCheckInterval, dynamic calculation is skipped
-		RenewalCheckInterval:    50 * time.Millisecond,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -389,8 +386,7 @@ func TestCachingClientPool_Close(t *testing.T) {
 
 			return client, nil
 		},
-		EnableRenewal:        true,
-		RenewalCheckInterval: 100 * time.Millisecond,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 
@@ -475,9 +471,7 @@ func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
 			clientCreationCount.Add(1)
 			return base(config)
 		},
-		EnableRenewal:           true,
-		RenewalCheckInterval:    50 * time.Millisecond,
-		RenewalThresholdPercent: 50,
+		RotationThresholdPercent: 50,
 		TokenOperationTimeout:   200 * time.Millisecond,
 		MaxCacheSize:            1,
 	})
@@ -531,7 +525,7 @@ func TestCachingClientPool_EvictionWaitsForRelease(t *testing.T) {
 
 			return client, nil
 		},
-		EnableRenewal: false,
+		RotationThresholdPercent: 50,
 		MaxCacheSize:  1,
 	})
 	require.NoError(t, err)
@@ -566,7 +560,7 @@ func TestCachingClientPool_Concurrency(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 			return fake.ClientWithLoginMock(config)
 		},
-		EnableRenewal: false,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -615,7 +609,7 @@ func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
 		NewVaultClient: fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
 			cl.MockGetAddress = func() string { return address }
 		}),
-		EnableRenewal: false,
+		RotationThresholdPercent: 50,
 		MaxCacheSize:  1,
 		OnClientEvicted: func(address string) {
 			if metricsPool != nil {
@@ -723,7 +717,7 @@ func TestCachingClientPool_ReauthFailFast(t *testing.T) {
 
 	config := CachingClientPoolConfig{
 		NewVaultClient: vaultClientFactory,
-		EnableRenewal:  false,
+		RotationThresholdPercent: 50,
 	}
 	pool, err := NewCachingClientPool(config)
 	require.NoError(t, err)
@@ -780,7 +774,7 @@ func TestCachingClientPool_DynamicTLSBypassesCache(t *testing.T) {
 			clientCreationCount.Add(1)
 			return fake.ClientWithLoginMock(config)
 		},
-		EnableRenewal: false,
+		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())

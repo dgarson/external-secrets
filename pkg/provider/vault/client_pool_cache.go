@@ -36,8 +36,8 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 )
 
-// CachingClientPool is a ClientPool implementation that caches ManagedClient instances using an LRU cache.
-// The pool is intentionally simple - ManagedClient instances handle their own lifecycle (renewal, eviction).
+// CachingClientPool is a ClientPool implementation that caches CachedClient instances using an LRU cache.
+// The pool is intentionally simple - CachedClient instances handle their own lifecycle.
 // The pool just maintains the cache and responds to eviction requests via callbacks.
 type CachingClientPool struct {
 	mu             sync.RWMutex
@@ -45,13 +45,11 @@ type CachingClientPool struct {
 	authGroup      singleflight.Group // Deduplicates concurrent client creation and authentication
 	newVaultClient func(config *vault.Config) (util.Client, error)
 
-	// Configuration for ManagedClient creation
-	enableRenewal           bool
-	renewalThresholdPercent int
-	renewalCheckInterval    time.Duration
-	tokenOperationTimeout   time.Duration
+	// Configuration for CachedClient creation
+	rotationThresholdPercent int
+	tokenOperationTimeout    time.Duration
 
-	// Client index for reverse lookup (client -> ManagedClient)
+	// Client index for reverse lookup (client -> CachedClient)
 	indexMu     sync.RWMutex
 	clientIndex map[util.Client]*CachedClient
 
@@ -63,12 +61,9 @@ type CachingClientPool struct {
 type CachingClientPoolConfig struct {
 	NewVaultClient func(config *vault.Config) (util.Client, error)
 
-	EnableRenewal           bool
-	RenewalThresholdPercent int
-	RenewalCheckInterval    time.Duration
-
-	TokenOperationTimeout time.Duration
-	MaxCacheSize          int
+	RotationThresholdPercent int
+	TokenOperationTimeout    time.Duration
+	MaxCacheSize             int
 
 	// Optional callback invoked when a client is evicted from the cache.
 	// This is called with the Vault server address of the evicted client.
@@ -81,12 +76,8 @@ func NewCachingClientPool(config CachingClientPoolConfig) (*CachingClientPool, e
 	if config.NewVaultClient == nil {
 		config.NewVaultClient = NewVaultClient
 	}
-	if config.RenewalCheckInterval == 0 {
-		config.RenewalCheckInterval = 30 * time.Minute
-	}
-	config.RenewalCheckInterval = clampRenewalInterval(config.RenewalCheckInterval)
-	if config.RenewalThresholdPercent == 0 {
-		config.RenewalThresholdPercent = 50
+	if config.RotationThresholdPercent == 0 {
+		config.RotationThresholdPercent = 50
 	}
 	if config.MaxCacheSize == 0 {
 		config.MaxCacheSize = 1000
@@ -96,13 +87,11 @@ func NewCachingClientPool(config CachingClientPoolConfig) (*CachingClientPool, e
 	}
 
 	pool := &CachingClientPool{
-		newVaultClient:          config.NewVaultClient,
-		enableRenewal:           config.EnableRenewal,
-		renewalThresholdPercent: config.RenewalThresholdPercent,
-		renewalCheckInterval:    config.RenewalCheckInterval,
-		tokenOperationTimeout:   config.TokenOperationTimeout,
-		onClientEvicted:         config.OnClientEvicted,
-		clientIndex:             make(map[util.Client]*CachedClient),
+		newVaultClient:           config.NewVaultClient,
+		rotationThresholdPercent: config.RotationThresholdPercent,
+		tokenOperationTimeout:    config.TokenOperationTimeout,
+		onClientEvicted:          config.OnClientEvicted,
+		clientIndex:              make(map[util.Client]*CachedClient),
 	}
 
 	cache, err := lru.NewWithEvict(config.MaxCacheSize, func(key string, managed *CachedClient) {
@@ -188,31 +177,22 @@ func (p *CachingClientPool) AcquireClient(ctx context.Context, config AcquireCli
 			return nil, err
 		}
 
-		// Create ManagedClient wrapper
+		// Create CachedClient wrapper
 		managed := NewCachedClient(CachedClientConfig{
-			Client:                  vaultClient,
-			Config:                  config,
-			CacheKey:                keyStr,
+			Client:   vaultClient,
+			Config:   config,
+			CacheKey: keyStr,
 			Deps: CachedClientDeps{
 				onEvicted: func(key string) {
-					// CachedClient is requesting eviction due to renewal failures
+					// CachedClient is requesting eviction
 					p.mu.Lock()
 					p.cache.Remove(key)
 					p.mu.Unlock()
 				},
 			},
-			EnableRenewal:           p.enableRenewal,
-			RenewalThresholdPercent: p.renewalThresholdPercent,
-			RenewalCheckInterval:    p.renewalCheckInterval,
-			TokenOperationTimeout:   p.tokenOperationTimeout,
+			RotationThresholdPercent: p.rotationThresholdPercent,
+			TokenOperationTimeout:    p.tokenOperationTimeout,
 		})
-
-		// Calculate initial renewal time after successful authentication
-		if p.enableRenewal {
-			reauthCtx, cancel := context.WithTimeout(ctx, p.tokenOperationTimeout)
-			managed.calculateAndSetNextRenewal(reauthCtx)
-			cancel()
-		}
 
 		// Add to cache and register for reverse lookup under write lock
 		p.mu.Lock()
