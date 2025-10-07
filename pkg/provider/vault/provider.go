@@ -38,10 +38,12 @@ import (
 )
 
 var (
-	_           esv1.Provider = &Provider{}
-	enableCache bool
-	logger      = ctrl.Log.WithName("provider").WithName("vault")
-	clientCache *cache.Cache[util.Client]
+	_             esv1.Provider = &Provider{}
+	enableCache   bool
+	enablePooling bool
+	logger        = ctrl.Log.WithName("provider").WithName("vault")
+	clientCache   *cache.Cache[util.Client]
+	clientPool    *ClientPool
 )
 
 const (
@@ -118,7 +120,9 @@ func (p *Provider) NewGeneratorClient(ctx context.Context, kube kclient.Client, 
 		return nil, err
 	}
 
-	return client, nil
+	// CRITICAL FIX (POOLING-RISKS.md ISSUE-002): Return vStore.client, not client
+	// vStore.client is set to the pooled client by initClient if pooling is enabled
+	return vStore.client, nil
 }
 
 func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube kclient.Client, corev1 typedcorev1.CoreV1Interface, namespace string) (esv1.SecretsClient, error) {
@@ -163,6 +167,64 @@ func (p *Provider) initClient(ctx context.Context, c *client, client util.Client
 		client.AddHeader("X-Vault-Inconsistent", "forward-active-node")
 	}
 
+	// Client pooling integration
+	if enablePooling && clientPool != nil {
+		poolKey, err := generatePoolKey(ctx, vaultSpec, c.namespace, c.kube, c.corev1, c.storeKind)
+		if err != nil {
+			logger.Error(err, "Failed to generate pool key, falling back to non-pooled client")
+		} else {
+			// Try to reuse authenticated client
+			if pooledClient := clientPool.GetAuthenticated(poolKey); pooledClient != nil {
+				c.client = pooledClient.client
+				c.auth = pooledClient.client.Auth()
+				c.logical = pooledClient.client.Logical()
+				c.token = pooledClient.client.AuthToken()
+
+				logger.V(1).Info("Reusing pooled Vault client", "poolKey", poolKey)
+				return c, nil
+			}
+
+			// Not in pool, will authenticate below and store
+			// CRITICAL: Capture error to prevent caching broken clients (POOLING-RISKS.md ISSUE-001)
+			var authErr error
+			defer func() {
+				// Only store if authentication succeeded AND token is present
+				if authErr == nil && c.client.Token() != "" {
+					authConfig := &AuthConfig{
+						vaultSpec: vaultSpec,
+						namespace: c.namespace,
+						kube:      c.kube,
+						corev1:    c.corev1,
+						storeKind: c.storeKind,
+					}
+					clientPool.StoreAuthenticated(poolKey, c.client, authConfig)
+					logger.V(1).Info("Stored new client in pool", "poolKey", poolKey)
+				}
+			}()
+
+			// Continue to standard initialization and authentication
+			c.client = client
+			c.auth = client.Auth()
+			c.logical = client.Logical()
+			c.token = client.AuthToken()
+
+			// allow SecretStore controller validation to pass
+			// when using referent namespace.
+			if c.storeKind == esv1.ClusterSecretStoreKind && c.namespace == "" && isReferentSpec(vaultSpec) {
+				return c, nil
+			}
+
+			// Capture error instead of immediate return (ISSUE-001 fix)
+			authErr = c.setAuth(ctx, cfg)
+			if authErr != nil {
+				return nil, authErr
+			}
+
+			return c, nil
+		}
+	}
+
+	// Non-pooled path (when pooling disabled or error generating pool key)
 	c.client = client
 	c.auth = client.Auth()
 	c.logical = client.Logical()
@@ -308,13 +370,36 @@ func initCache(size int) {
 
 func init() {
 	var vaultTokenCacheSize int
+	var vaultPoolSize int
+	var vaultPoolTTL time.Duration
+
 	fs := pflag.NewFlagSet("vault", pflag.ExitOnError)
 	fs.BoolVar(&enableCache, "experimental-enable-vault-token-cache", false, "Enable experimental Vault token cache. External secrets will reuse the Vault token without creating a new one on each request.")
 	// max. 265k vault leases with 30bytes each ~= 7MB
 	fs.IntVar(&vaultTokenCacheSize, "experimental-vault-token-cache-size", defaultCacheSize, "Maximum size of Vault token cache. When more tokens than Only used if --experimental-enable-vault-token-cache is set.")
+
+	// Client pooling flags
+	fs.BoolVar(&enablePooling, "experimental-enable-vault-client-pooling", false,
+		"Enable experimental Vault client pooling. Reuses authenticated Vault "+
+			"clients across SecretStore, ClusterSecretStore, and VaultDynamicSecret "+
+			"resources with identical authentication configuration.")
+	fs.IntVar(&vaultPoolSize, "experimental-vault-pool-size", 100,
+		"Maximum number of clients in Vault pool. Only used if "+
+			"--experimental-enable-vault-client-pooling is set.")
+	fs.DurationVar(&vaultPoolTTL, "experimental-vault-pool-ttl", 15*time.Minute,
+		"TTL for idle clients in Vault pool. Clients unused for this duration "+
+			"are evicted. Only used if --experimental-enable-vault-client-pooling is set.")
+
 	feature.Register(feature.Feature{
-		Flags:      fs,
-		Initialize: func() { initCache(vaultTokenCacheSize) },
+		Flags: fs,
+		Initialize: func() {
+			initCache(vaultTokenCacheSize)
+			if enablePooling {
+				clientPool = NewClientPool(vaultPoolSize, vaultPoolTTL)
+				clientPool.StartEviction(context.Background())
+				logger.Info("Vault client pool initialized", "maxSize", vaultPoolSize, "ttl", vaultPoolTTL)
+			}
+		},
 	})
 
 	esv1.Register(&Provider{

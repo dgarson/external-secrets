@@ -34,6 +34,38 @@ var (
 		Name:      providerAPICalls,
 		Help:      "Number of API calls towards the secret provider",
 	}, []string{"provider", "call", "status"})
+
+	// Vault client pool metrics
+	VaultClientPoolHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: "vault",
+		Name:      "client_pool_hits_total",
+		Help:      "Total number of Vault client pool cache hits",
+	})
+
+	VaultClientPoolMisses = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: "vault",
+		Name:      "client_pool_misses_total",
+		Help:      "Total number of Vault client pool cache misses",
+	})
+
+	VaultClientPoolEvictions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: "vault",
+		Name:      "client_pool_evictions_total",
+		Help:      "Total number of Vault client pool evictions",
+	}, []string{"reason"}) // reason: "ttl", "size"
+
+	VaultClientPoolSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: "vault",
+		Name:      "client_pool_size",
+		Help:      "Current number of clients in the Vault client pool",
+	})
+
+	VaultClientPoolAuthTime = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: "vault",
+		Name:      "client_pool_auth_duration_seconds",
+		Help:      "Time spent authenticating to Vault",
+		Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0},
+	})
 )
 
 func ObserveAPICall(provider, call string, err error) {
@@ -48,5 +80,12 @@ func deriveStatus(err error) string {
 }
 
 func init() {
-	metrics.Registry.MustRegister(syncCallsTotal)
+	metrics.Registry.MustRegister(
+		syncCallsTotal,
+		VaultClientPoolHits,
+		VaultClientPoolMisses,
+		VaultClientPoolEvictions,
+		VaultClientPoolSize,
+		VaultClientPoolAuthTime,
+	)
 }
