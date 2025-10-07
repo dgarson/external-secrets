@@ -225,13 +225,13 @@ func checkToken(ctx context.Context, token util.Token) (bool, error) {
 	return true, nil
 }
 
-func revokeTokenIfValid(ctx context.Context, client util.Client) error {
-	valid, err := checkToken(ctx, client.AuthToken())
+func revokeTokenIfValid(ctx context.Context, client util.Token) error {
+	valid, err := checkToken(ctx, client)
 	if err != nil {
 		return fmt.Errorf(errVaultRevokeToken, err)
 	}
 	if valid {
-		err = client.AuthToken().RevokeSelfWithContext(ctx, client.Token())
+		err = client.RevokeSelfWithContext(ctx, client())
 		metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultRevokeSelf, err)
 		if err != nil {
 			return fmt.Errorf(errVaultRevokeToken, err)
