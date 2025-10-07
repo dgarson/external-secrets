@@ -770,7 +770,7 @@ func TestCachingClientPool_ReauthFailFast(t *testing.T) {
 
 // NOTE: TestCachingClientPool_ReauthBackoffExponential has been removed.
 // The exponential backoff calculation logic is now tested in managed_client_test.go
-// as it's part of ManagedClient, not CachingClientPool.
+// as it's part of CachedClient, not CachingClientPool.
 
 func TestCachingClientPool_DynamicTLSBypassesCache(t *testing.T) {
 	var clientCreationCount atomic.Int32
@@ -904,7 +904,7 @@ func strPtr(s string) *string {
 func TestCachingClientPool_ConcurrentReauthDeduplication(t *testing.T) {
 	t.Skip("This test has complex mock requirements that make it flaky. The re-auth singleflight behavior is verified by the broader integration test suite and manual testing.")
 
-	// Note: Re-authentication singleflight is implemented in ManagedClient.GetValidClient()
+	// Note: Re-authentication singleflight is implemented in CachedClient.GetValidClient()
 	// via m.reauthGroup.Do("reauth", ...). The implementation is correct, but writing a
 	// reliable unit test requires complex mock coordination between token validation and
 	// authentication that introduces timing races. The functionality is adequately covered by:

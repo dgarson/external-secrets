@@ -34,11 +34,11 @@ const (
 	renewalFailureThreshold      = 3
 )
 
-// ManagedClientDeps provides dependencies for the ManagedClient to coordinate
-// with the pool without tight coupling. These functions allow the ManagedClient
+// CachedClientDeps provides dependencies for the CachedClient to coordinate
+// with the pool without tight coupling. These functions allow the CachedClient
 // to perform actions without knowing about pool internals.
-type ManagedClientDeps struct {
-	// onEvicted is called when the ManagedClient determines it should be
+type CachedClientDeps struct {
+	// onEvicted is called when the CachedClient determines it should be
 	// evicted from the pool (e.g., due to repeated renewal failures).
 	// The pool should remove this client from the cache.
 	onEvicted func(key string)
@@ -135,14 +135,14 @@ func parseTokenMetadata(data map[string]interface{}) (*tokenMetadata, error) {
 	return meta, nil
 }
 
-// ManagedClient wraps a Vault client with automatic token renewal and re-authentication.
+// CachedClient wraps a Vault client with automatic token renewal and re-authentication.
 // This is a self-contained object that manages its own lifecycle, including running a renewal
 // goroutine if enabled. It uses dependency injection to coordinate with the pool without tight coupling.
-type ManagedClient struct {
+type CachedClient struct {
 	client   util.Client
 	config   AcquireClientConfig
 	cacheKey string
-	deps     ManagedClientDeps
+	deps     CachedClientDeps
 
 	// Token renewal
 	stopRenewal     chan struct{}
@@ -168,27 +168,27 @@ type ManagedClient struct {
 	finalizeOnce    sync.Once
 }
 
-// ManagedClientConfig configures a ManagedClient instance.
-type ManagedClientConfig struct {
+// CachedClientConfig configures a CachedClient instance.
+type CachedClientConfig struct {
 	Client                  util.Client
 	Config                  AcquireClientConfig
 	CacheKey                string
-	Deps                    ManagedClientDeps
+	Deps                    CachedClientDeps
 	EnableRenewal           bool
 	RenewalThresholdPercent int
 	RenewalCheckInterval    time.Duration
 	TokenOperationTimeout   time.Duration
 }
 
-// NewManagedClient creates a new managed Vault client.
+// NewCachedClient creates a new cached Vault client.
 // If EnableRenewal is true, this will start a background goroutine to manage token renewal.
-// The goroutine is owned by the ManagedClient and will be stopped when Close() is called.
-func NewManagedClient(cfg ManagedClientConfig) *ManagedClient {
+// The goroutine is owned by the CachedClient and will be stopped when Close() is called.
+func NewCachedClient(cfg CachedClientConfig) *CachedClient {
 	timeout := cfg.TokenOperationTimeout
 	if timeout == 0 {
 		timeout = defaultTokenOperationTimeout
 	}
-	mc := &ManagedClient{
+	mc := &CachedClient{
 		client:                  cfg.Client,
 		config:                  cfg.Config,
 		cacheKey:                cfg.CacheKey,
@@ -209,54 +209,54 @@ func NewManagedClient(cfg ManagedClientConfig) *ManagedClient {
 }
 
 // Client returns the underlying Vault client.
-func (m *ManagedClient) Client() util.Client {
-	return m.client
+func (c *CachedClient) Client() util.Client {
+	return c.client
 }
 
 // CacheKey returns the cache key for this client.
-func (m *ManagedClient) CacheKey() string {
-	return m.cacheKey
+func (c *CachedClient) CacheKey() string {
+	return c.cacheKey
 }
 
 // Acquire increments the active users count.
 // This is called when a client is acquired from the pool.
-func (m *ManagedClient) Acquire() {
-	atomic.AddInt32(&m.activeUsers, 1)
+func (c *CachedClient) Acquire() {
+	atomic.AddInt32(&c.activeUsers, 1)
 }
 
 // Release decrements the active users count.
 // Returns true if the client should be finalized (refcount is 0 and evicted).
 // This is called when a client is released back to the pool.
-func (m *ManagedClient) Release() bool {
-	remaining := atomic.AddInt32(&m.activeUsers, -1)
-	isEvicted := atomic.LoadInt32(&m.evicted) == 1
+func (c *CachedClient) Release() bool {
+	remaining := atomic.AddInt32(&c.activeUsers, -1)
+	isEvicted := atomic.LoadInt32(&c.evicted) == 1
 	return remaining == 0 && isEvicted
 }
 
 // updateConfig updates the cached configuration (used after successful re-auth).
-func (m *ManagedClient) updateConfig(config AcquireClientConfig) {
-	m.renewalMu.Lock()
-	defer m.renewalMu.Unlock()
-	m.config = config
+func (c *CachedClient) updateConfig(config AcquireClientConfig) {
+	c.renewalMu.Lock()
+	defer c.renewalMu.Unlock()
+	c.config = config
 }
 
 // stopRenewalGoroutine stops the token renewal goroutine (internal use).
-func (m *ManagedClient) stopRenewalGoroutine() {
-	m.stopRenewalOnce.Do(func() {
-		close(m.stopRenewal)
+func (c *CachedClient) stopRenewalGoroutine() {
+	c.stopRenewalOnce.Do(func() {
+		close(c.stopRenewal)
 	})
 }
 
 // calculateAndSetNextRenewal computes when the next renewal should occur
 // based on the token's creation TTL and renewal threshold percentage.
 // This should only be called after successful authentication or renewal.
-func (m *ManagedClient) calculateAndSetNextRenewal(ctx context.Context) {
-	if m.renewalThresholdPercent <= 0 {
+func (c *CachedClient) calculateAndSetNextRenewal(ctx context.Context) {
+	if c.renewalThresholdPercent <= 0 {
 		return // Renewal timing not configured
 	}
 
 	// Don't hold lock during API call
-	resp, err := m.client.AuthToken().LookupSelfWithContext(ctx)
+	resp, err := c.client.AuthToken().LookupSelfWithContext(ctx)
 	if err != nil {
 		logger.V(1).Info("failed to lookup token for next renewal calculation", "err", err)
 		return
@@ -273,12 +273,12 @@ func (m *ManagedClient) calculateAndSetNextRenewal(ctx context.Context) {
 	}
 
 	if !meta.renewable {
-		logger.V(1).Info("token is not renewable, skipping next renewal calculation", "key", m.cacheKey)
+		logger.V(1).Info("token is not renewable, skipping next renewal calculation", "key", c.cacheKey)
 		return
 	}
 
 	// Calculate renewal threshold (the TTL value at which we should renew)
-	thresholdSeconds := (meta.creationTTL * int64(m.renewalThresholdPercent)) / 100
+	thresholdSeconds := (meta.creationTTL * int64(c.renewalThresholdPercent)) / 100
 	if thresholdSeconds <= 0 {
 		thresholdSeconds = 1
 	}
@@ -296,70 +296,70 @@ func (m *ManagedClient) calculateAndSetNextRenewal(ctx context.Context) {
 	}
 
 	// Lock only for the update
-	m.renewalMu.Lock()
-	m.nextRenewal = time.Now().Add(time.Duration(timeUntilRenewal) * time.Second)
-	m.renewalMu.Unlock()
+	c.renewalMu.Lock()
+	c.nextRenewal = time.Now().Add(time.Duration(timeUntilRenewal) * time.Second)
+	c.renewalMu.Unlock()
 
-	logger.V(1).Info("next renewal scheduled", "key", m.cacheKey, "nextRenewal", m.nextRenewal, "ttl", meta.ttl, "threshold", thresholdSeconds, "timeUntilRenewal", timeUntilRenewal)
+	logger.V(1).Info("next renewal scheduled", "key", c.cacheKey, "nextRenewal", c.nextRenewal, "ttl", meta.ttl, "threshold", thresholdSeconds, "timeUntilRenewal", timeUntilRenewal)
 }
 
 // checkAndRenew attempts to renew the token and schedules the next renewal (internal use).
-func (m *ManagedClient) checkAndRenew(ctx context.Context) error {
-	logger.V(1).Info("renewing token", "key", m.cacheKey)
+func (c *CachedClient) checkAndRenew(ctx context.Context) error {
+	logger.V(1).Info("renewing token", "key", c.cacheKey)
 
 	// Attempt renewal (no lock needed for Vault API call)
-	_, err := m.client.AuthToken().RenewSelfWithContext(ctx, 0)
+	_, err := c.client.AuthToken().RenewSelfWithContext(ctx, 0)
 	if err != nil {
 		return fmt.Errorf("failed to renew token: %w", err)
 	}
 
 	// Success - reset failure counter and calculate next renewal
-	atomic.StoreInt32(&m.renewalFailures, 0)
-	logger.V(1).Info("token renewed successfully", "key", m.cacheKey)
+	atomic.StoreInt32(&c.renewalFailures, 0)
+	logger.V(1).Info("token renewed successfully", "key", c.cacheKey)
 
-	m.calculateAndSetNextRenewal(ctx)
+	c.calculateAndSetNextRenewal(ctx)
 
 	return nil
 }
 
 // validateToken checks if the current token is valid.
-func (m *ManagedClient) validateToken(ctx context.Context) (bool, error) {
-	return checkToken(ctx, m.client.AuthToken())
+func (c *CachedClient) validateToken(ctx context.Context) (bool, error) {
+	return checkToken(ctx, c.client.AuthToken())
 }
 
 // reauthenticate attempts to re-authenticate the client using fresh credentials.
 // This is used when a cached client's token becomes invalid, ensuring that if credentials
 // have been rotated in Kubernetes (e.g., AppRole secret, ServiceAccount token), we use
 // the latest values.
-func (m *ManagedClient) reauthenticate(ctx context.Context, currentConfig AcquireClientConfig) error {
+func (c *CachedClient) reauthenticate(ctx context.Context, currentConfig AcquireClientConfig) error {
 	// Use current config (with fresh credentials from K8s) instead of cached config
-	c := &client{
+	authClient := &client{
 		kube:      currentConfig.Kube,
 		corev1:    currentConfig.CoreV1,
 		store:     currentConfig.VaultProvider,
 		namespace: currentConfig.CredentialNamespace,
 		storeKind: currentConfig.Metadata.StoreKind,
-		client:    m.client,
-		auth:      m.client.Auth(),
-		logical:   m.client.Logical(),
-		token:     m.client.AuthToken(),
+		client:    c.client,
+		auth:      c.client.Auth(),
+		logical:   c.client.Logical(),
+		token:     c.client.AuthToken(),
 		log:       logger,
 	}
 
-	reauthCtx, cancel := context.WithTimeout(ctx, m.tokenOperationTimeout)
+	reauthCtx, cancel := context.WithTimeout(ctx, c.tokenOperationTimeout)
 	defer cancel()
 
-	if err := c.setAuth(reauthCtx, currentConfig.VaultConfig); err != nil {
+	if err := authClient.setAuth(reauthCtx, currentConfig.VaultConfig); err != nil {
 		return fmt.Errorf("failed to re-authenticate: %w", err)
 	}
 
 	// Update the cached config with fresh credentials for future renewals
-	m.updateConfig(currentConfig)
+	c.updateConfig(currentConfig)
 
 	// Calculate next renewal time after successful re-authentication
-	m.calculateAndSetNextRenewal(ctx)
+	c.calculateAndSetNextRenewal(ctx)
 
-	logger.V(1).Info("re-authentication succeeded", "key", m.cacheKey)
+	logger.V(1).Info("re-authentication succeeded", "key", c.cacheKey)
 
 	return nil
 }
@@ -368,55 +368,55 @@ func (m *ManagedClient) reauthenticate(ctx context.Context, currentConfig Acquir
 // This method consolidates token validation and re-authentication logic.
 // Uses a simple mutex to prevent concurrent re-authentication attempts.
 // Returns the client on success, or an error if re-authentication fails.
-func (m *ManagedClient) GetValidClient(ctx context.Context, freshConfig AcquireClientConfig) (util.Client, error) {
+func (c *CachedClient) GetValidClient(ctx context.Context, freshConfig AcquireClientConfig) (util.Client, error) {
 	// First, check if the current token is valid
-	valid, err := m.validateToken(ctx)
+	valid, err := c.validateToken(ctx)
 	if err == nil && valid {
 		// Token is valid, return client immediately (fast path)
-		return m.client, nil
+		return c.client, nil
 	}
 
 	// Token is invalid - acquire lock to prevent concurrent re-authentication
-	m.reauthMu.Lock()
-	defer m.reauthMu.Unlock()
+	c.reauthMu.Lock()
+	defer c.reauthMu.Unlock()
 
 	// Re-check validity after acquiring lock (another goroutine may have re-authed)
-	valid, err = m.validateToken(ctx)
+	valid, err = c.validateToken(ctx)
 	if err == nil && valid {
-		return m.client, nil
+		return c.client, nil
 	}
 
 	// Perform re-authentication
-	logger.V(1).Info("cached vault client token invalid, re-authenticating with fresh credentials", "key", m.cacheKey)
+	logger.V(1).Info("cached vault client token invalid, re-authenticating with fresh credentials", "key", c.cacheKey)
 
 	// Clear the old token before re-authenticating
-	m.client.ClearToken()
+	c.client.ClearToken()
 
 	// Attempt re-authentication once (fail fast, let reconciliation loop retry)
-	if err := m.reauthenticate(ctx, freshConfig); err != nil {
+	if err := c.reauthenticate(ctx, freshConfig); err != nil {
 		return nil, fmt.Errorf("re-authentication failed: %w", err)
 	}
 
-	return m.client, nil
+	return c.client, nil
 }
 
 // renewalLoop runs in a goroutine to periodically check and renew tokens.
 // This is owned by the ManagedClient and runs independently of the pool.
-func (m *ManagedClient) renewalLoop() {
+func (c *CachedClient) renewalLoop() {
 	// Use fixed polling interval for checking if it's time to renew
-	ticker := time.NewTicker(m.renewalCheckInterval)
+	ticker := time.NewTicker(c.renewalCheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-m.stopRenewal:
+		case <-c.stopRenewal:
 			// Renewal goroutine stopped
 			return
 		case <-ticker.C:
 			// Check if it's time to renew
-			m.renewalMu.RLock()
-			nextRenewal := m.nextRenewal
-			m.renewalMu.RUnlock()
+			c.renewalMu.RLock()
+			nextRenewal := c.nextRenewal
+			c.renewalMu.RUnlock()
 
 			// Skip if nextRenewal not initialized or not time yet
 			if nextRenewal.IsZero() || time.Now().Before(nextRenewal) {
@@ -424,18 +424,18 @@ func (m *ManagedClient) renewalLoop() {
 			}
 
 			// Perform renewal
-			ctx, cancel := context.WithTimeout(context.Background(), m.tokenOperationTimeout)
-			if err := m.checkAndRenew(ctx); err != nil {
-				count := atomic.AddInt32(&m.renewalFailures, 1)
-				logger.Error(err, "token renewal failed", "key", m.cacheKey, "failures", count)
+			ctx, cancel := context.WithTimeout(context.Background(), c.tokenOperationTimeout)
+			if err := c.checkAndRenew(ctx); err != nil {
+				count := atomic.AddInt32(&c.renewalFailures, 1)
+				logger.Error(err, "token renewal failed", "key", c.cacheKey, "failures", count)
 
 				if count >= renewalFailureThreshold {
-					logger.Error(err, "evicting client after repeated renewal failures", "key", m.cacheKey)
+					logger.Error(err, "evicting client after repeated renewal failures", "key", c.cacheKey)
 
 					// Mark as evicted and request eviction from pool
-					atomic.StoreInt32(&m.evicted, 1)
-					if m.deps.onEvicted != nil {
-						m.deps.onEvicted(m.cacheKey)
+					atomic.StoreInt32(&c.evicted, 1)
+					if c.deps.onEvicted != nil {
+						c.deps.onEvicted(c.cacheKey)
 					}
 
 					cancel()
@@ -450,25 +450,25 @@ func (m *ManagedClient) renewalLoop() {
 // Close performs cleanup operations for this client.
 // This stops the renewal goroutine, revokes the token (if not a static token),
 // and performs any other cleanup. This is called when the client is finalized.
-func (m *ManagedClient) Close(ctx context.Context) error {
+func (c *CachedClient) Close(ctx context.Context) error {
 	var finalizeErr error
-	m.finalizeOnce.Do(func() {
+	c.finalizeOnce.Do(func() {
 		// Stop renewal goroutine first
-		m.stopRenewalGoroutine()
+		c.stopRenewalGoroutine()
 
 		// Only revoke if this is not a static token (TokenSecretRef)
-		if m.config.VaultProvider.Auth == nil || m.config.VaultProvider.Auth.TokenSecretRef == nil {
-			revokeCtx, cancel := context.WithTimeout(ctx, m.tokenOperationTimeout)
+		if c.config.VaultProvider.Auth == nil || c.config.VaultProvider.Auth.TokenSecretRef == nil {
+			revokeCtx, cancel := context.WithTimeout(ctx, c.tokenOperationTimeout)
 			defer cancel()
 
-			if err := revokeTokenIfValid(revokeCtx, m.client); err != nil {
-				logger.V(1).Info("failed to revoke token during finalization", "key", m.cacheKey, "err", err)
+			if err := revokeTokenIfValid(revokeCtx, c.client); err != nil {
+				logger.V(1).Info("failed to revoke token during finalization", "key", c.cacheKey, "err", err)
 				finalizeErr = fmt.Errorf("failed to revoke token: %w", err)
 			} else {
-				logger.V(1).Info("token revoked during finalization", "key", m.cacheKey)
+				logger.V(1).Info("token revoked during finalization", "key", c.cacheKey)
 			}
 		} else {
-			logger.V(1).Info("skipping token revocation for static token", "key", m.cacheKey)
+			logger.V(1).Info("skipping token revocation for static token", "key", c.cacheKey)
 		}
 	})
 	return finalizeErr
