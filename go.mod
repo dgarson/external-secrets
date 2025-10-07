@@ -101,6 +101,7 @@ require (
 	github.com/google/go-github/v56 v56.0.0
 	github.com/grafana/grafana-openapi-client-go v0.0.0-20250925215610-d92957c70d5c
 	github.com/hashicorp/golang-lru v1.0.2
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/vault/api/auth/aws v0.10.0
 	github.com/hashicorp/vault/api/auth/userpass v0.10.0
 	github.com/infisical/go-sdk v0.5.100
@@ -117,6 +118,7 @@ require (
 	github.com/tidwall/sjson v1.2.5
 	github.com/volcengine/volcengine-go-sdk v1.1.37
 	gitlab.com/gitlab-org/api/client-go v0.148.1
+	golang.org/x/sync v0.17.0
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912
 	sigs.k8s.io/yaml v1.6.0
 	software.sslmate.com/src/go-pkcs12 v0.6.0
@@ -212,7 +214,6 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/hashicorp/go-secure-stdlib/awsutil v0.3.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/hcl/v2 v2.24.0 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20250628045327-2d64ad6b7ec5 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
@@ -262,7 +263,6 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect
-	golang.org/x/sync v0.17.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250922171735-9219d122eba9 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250922171735-9219d122eba9 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
