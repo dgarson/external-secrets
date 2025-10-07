@@ -120,7 +120,6 @@ func TestCachingClientPool_BasicCaching(t *testing.T) {
 			clientCreationCount.Add(1)
 			return fake.ClientWithLoginMock(config)
 		},
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -172,7 +171,6 @@ func TestCachingClientPool_BasicCaching(t *testing.T) {
 func TestCachingClientPool_DifferentCacheKeys(t *testing.T) {
 	pool, err := NewCachingClientPool(CachingClientPoolConfig{
 		NewVaultClient: fake.ClientWithLoginMock,
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -254,7 +252,6 @@ func TestCachingClientPool_StaticTokenHandling(t *testing.T) {
 
 			return client, nil
 		},
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -273,6 +270,7 @@ func TestCachingClientPool_StaticTokenHandling(t *testing.T) {
 }
 
 func TestCachingClientPool_TokenRenewal(t *testing.T) {
+	t.Skip("Renewal removed - using reactive re-auth only")
 	var renewalCallCount atomic.Int32
 
 	pool, err := NewCachingClientPool(CachingClientPoolConfig{
@@ -306,7 +304,6 @@ func TestCachingClientPool_TokenRenewal(t *testing.T) {
 
 			return client, nil
 		},
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -386,7 +383,6 @@ func TestCachingClientPool_Close(t *testing.T) {
 
 			return client, nil
 		},
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 
@@ -442,6 +438,7 @@ func TestCachingClientPool_Close(t *testing.T) {
 }
 
 func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
+	t.Skip("Renewal removed - using reactive re-auth only")
 	var renewAttempts atomic.Int32
 	var clientCreationCount atomic.Int32
 
@@ -471,7 +468,6 @@ func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
 			clientCreationCount.Add(1)
 			return base(config)
 		},
-		RotationThresholdPercent: 50,
 		TokenOperationTimeout:   200 * time.Millisecond,
 		MaxCacheSize:            1,
 	})
@@ -484,7 +480,7 @@ func TestCachingClientPool_RenewalFailureEvictsClient(t *testing.T) {
 	require.NotNil(t, client)
 
 	require.Eventually(t, func() bool {
-		return renewAttempts.Load() >= renewalFailureThreshold
+		return renewAttempts.Load() >= 3
 	}, 2*time.Second, 50*time.Millisecond)
 
 	// Allow eviction to process
@@ -525,7 +521,6 @@ func TestCachingClientPool_EvictionWaitsForRelease(t *testing.T) {
 
 			return client, nil
 		},
-		RotationThresholdPercent: 50,
 		MaxCacheSize:  1,
 	})
 	require.NoError(t, err)
@@ -560,7 +555,6 @@ func TestCachingClientPool_Concurrency(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 			return fake.ClientWithLoginMock(config)
 		},
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
@@ -609,7 +603,6 @@ func TestCachingClientPool_PoolSizeMetrics(t *testing.T) {
 		NewVaultClient: fake.ModifiableClientWithLoginMock(func(cl *fake.VaultClient) {
 			cl.MockGetAddress = func() string { return address }
 		}),
-		RotationThresholdPercent: 50,
 		MaxCacheSize:  1,
 		OnClientEvicted: func(address string) {
 			if metricsPool != nil {
@@ -688,6 +681,7 @@ func getPoolGaugeValue(t *testing.T, address string) float64 {
 // Re-authentication now uses fail-fast approach (no exponential backoff).
 
 func TestCachingClientPool_ReauthFailFast(t *testing.T) {
+	t.Skip("Pro-active validation removed - using zero-overhead caching. Re-auth only happens when caller gets 403/401 from actual Vault operation.")
 	reauthAttempts := atomic.Int32{}
 	reauthAttempts.Store(0)
 	shouldFail := atomic.Bool{}
@@ -717,7 +711,6 @@ func TestCachingClientPool_ReauthFailFast(t *testing.T) {
 
 	config := CachingClientPoolConfig{
 		NewVaultClient: vaultClientFactory,
-		RotationThresholdPercent: 50,
 	}
 	pool, err := NewCachingClientPool(config)
 	require.NoError(t, err)
@@ -774,7 +767,6 @@ func TestCachingClientPool_DynamicTLSBypassesCache(t *testing.T) {
 			clientCreationCount.Add(1)
 			return fake.ClientWithLoginMock(config)
 		},
-		RotationThresholdPercent: 50,
 	})
 	require.NoError(t, err)
 	defer pool.Close(context.Background())
