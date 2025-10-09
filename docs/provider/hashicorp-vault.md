@@ -418,6 +418,86 @@ The provider automatically detects which authentication method is available and 
 ```
 **NOTE:** In case of a `ClusterSecretStore`, Be sure to provide `namespace` in `secretRef` with the namespace where the secret resides.
 
+### Client Pooling & Performance
+
+The Vault provider automatically implements **client pooling** to improve performance by reusing authenticated Vault clients across multiple ExternalSecrets. This reduces authentication overhead and speeds up secret synchronization.
+
+#### How Client Pooling Works
+
+When multiple ExternalSecrets use the **same credentials**, they automatically share a single authenticated Vault client. This means:
+
+- **Faster reconciliation**: Vault authentication (typically 50-200ms) happens once instead of for every ExternalSecret
+- **Reduced load on Vault**: Fewer authentication requests
+- **Automatic**: No configuration needed
+
+#### When Clients Are Shared
+
+**Scenario 1: Multiple ExternalSecrets with the same SecretStore**
+
+If you have 5 ExternalSecrets in the same namespace that all reference the same SecretStore, and that SecretStore uses the same Vault token Secret, all 5 ExternalSecrets will share **one Vault client**.
+
+```yaml
+# All of these ExternalSecrets in namespace "apps"
+# reference SecretStore "vault-backend" which uses Secret "apps/vault-token"
+# Result: ONE shared Vault client
+```
+
+**Scenario 2: ClusterSecretStore with explicit namespace**
+
+If you have ExternalSecrets across multiple namespaces using a ClusterSecretStore that references a Secret with an explicit namespace (e.g., `vault-system/vault-token`), all ExternalSecrets will share **one Vault client**.
+
+```yaml
+# ClusterSecretStore references "vault-system/vault-token"
+# ExternalSecrets in ns-1, ns-2, ns-3 all use this ClusterSecretStore
+# Result: ONE shared Vault client
+```
+
+**Scenario 3: ClusterSecretStore with referent authentication (per-namespace credentials)**
+
+If you have a ClusterSecretStore that uses referent authentication (Secret reference without namespace), each namespace gets its **own Vault client** because each namespace has different credentials.
+
+```yaml
+# ClusterSecretStore references "vault-token" (no namespace specified)
+# ExternalSecret in ns-1 uses Secret "ns-1/vault-token" → Client A
+# ExternalSecret in ns-2 uses Secret "ns-2/vault-token" → Client B
+# Result: SEPARATE clients per namespace
+```
+
+#### Cache Invalidation
+
+The client pool automatically invalidates when credentials change:
+
+- **Secret updated**: When you update the Secret containing Vault credentials (token rotation), ExternalSecrets automatically create new Vault clients with the updated credentials
+- **Secret deleted/recreated**: New Vault clients are created automatically
+- **ServiceAccount updated**: For auth methods using ServiceAccounts (Kubernetes auth, IRSA), updating the ServiceAccount triggers new clients
+
+**Important**: The cache invalidation is automatic and immediate. You don't need to restart the External Secrets Operator or manually trigger reconciliation after rotating credentials.
+
+#### What Doesn't Trigger Invalidation
+
+Changes **outside of Kubernetes resources** don't automatically trigger cache invalidation:
+
+- Vault policy changes
+- AWS IAM policy changes (for IAM auth)
+- Network or firewall configuration changes
+
+These are handled by:
+- Vault token TTLs (clients re-authenticate when tokens expire)
+- Error handling and automatic retry logic
+- Regular reconciliation intervals
+
+#### Performance Impact
+
+In a typical deployment with 50 ExternalSecrets using the same credentials:
+
+- **Without pooling**: 50 Vault authentications = 2,500-10,000ms
+- **With pooling**: 1 Vault authentication = 50-200ms
+- **Improvement**: ~10x faster
+
+#### Technical Details
+
+For implementation details, architecture decisions, and security considerations, see the [Vault Client Pooling Design Document](../../design/013-vault-client-pooling.md).
+
 ### PushSecret
 
 Vault supports PushSecret features which allow you to sync a given Kubernetes secret key into a Hashicorp vault secret. To do so, it is expected that the secret key is a valid JSON object or that the `property` attribute has been specified under the `remoteRef`.

@@ -782,6 +782,10 @@ func TestGetControllerPodCredentials(t *testing.T) {
 
 func TestCache(t *testing.T) {
 	t.Cleanup(resetCache)
+	t.Cleanup(func() { enableVaultClientPooling = true }) // Reset pooling flag after test
+
+	// Disable pooling to test OLD cache behavior
+	enableVaultClientPooling = false
 	enableCache = true
 	initCache(defaultCacheSize)
 
@@ -798,35 +802,61 @@ func TestCache(t *testing.T) {
 		}
 	})
 
-	// first request creates a new client:
-	c1, err := getVaultClient(prov, store, nil, namespace)
+	kube := clientfake.NewClientBuilder().WithObjects(&corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vault-sa",
+			Namespace: namespace,
+		},
+	}).Build()
+
+	ctx := context.Background()
+	vaultSpec := store.GetSpec().Provider.Vault
+
+	// First request creates a new client
+	client1, cfg1, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, namespace, store.GetObjectKind().GroupVersionKind().Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquireVaultClient(ctx, prov, client1, cfg1, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// seconds request should retrieve cached client instance:
-	c2, err := getVaultClient(prov, store, nil, namespace)
+	// Second request should retrieve cached client instance
+	client2, cfg2, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, namespace, store.GetObjectKind().GroupVersionKind().Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquireVaultClient(ctx, prov, client2, cfg2, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if c1 != c2 {
+	if client1.client != client2.client {
 		t.Fatal("Expected a cached client instance")
 	}
 
-	// third request should retrieve cached client instance even when using a different namespace,
-	// because the ClusterSecretStore references a ServiceAccount of a specific namespace:
-	c3, err := getVaultClient(prov, store, nil, "another-namespace")
+	// Third request should retrieve cached client instance even when using a different namespace,
+	// because the ClusterSecretStore references a ServiceAccount of a specific namespace
+	client3, cfg3, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "another-namespace", store.GetObjectKind().GroupVersionKind().Kind)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c3 != c1 {
+	_, err = acquireVaultClient(ctx, prov, client3, cfg3, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client3.client != client1.client {
 		t.Fatal("Expected a cached client instance")
 	}
 }
 
 func TestCacheWithReferentSpec(t *testing.T) {
 	t.Cleanup(resetCache)
+	t.Cleanup(func() { enableVaultClientPooling = true }) // Reset pooling flag after test
+
+	// Disable pooling to test OLD cache behavior
+	enableVaultClientPooling = false
 	enableCache = true
 	initCache(defaultCacheSize)
 
@@ -841,29 +871,59 @@ func TestCacheWithReferentSpec(t *testing.T) {
 		}
 	})
 
-	// first request creates a new client:
-	c1, err := getVaultClient(prov, store, nil, "default")
+	kube := clientfake.NewClientBuilder().WithObjects(
+		&corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "vault-sa",
+				Namespace: "default",
+			},
+		},
+		&corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "vault-sa",
+				Namespace: "another-namespace",
+			},
+		},
+	).Build()
+
+	ctx := context.Background()
+	vaultSpec := store.GetSpec().Provider.Vault
+
+	// First request creates a new client
+	client1, cfg1, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "default", store.GetObjectKind().GroupVersionKind().Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquireVaultClient(ctx, prov, client1, cfg1, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// seconds request should retrieve cached client instance:
-	c2, err := getVaultClient(prov, store, nil, "default")
+	// Second request should retrieve cached client instance
+	client2, cfg2, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "default", store.GetObjectKind().GroupVersionKind().Kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquireVaultClient(ctx, prov, client2, cfg2, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if c1 != c2 {
+	if client1.client != client2.client {
 		t.Fatal("Expected a cached client instance")
 	}
 
-	// third request should retrieve a new client instance,
-	// because the ServiceAccount namespace depends on the namespace of the referent:
-	c3, err := getVaultClient(prov, store, nil, "another-namespace")
+	// Third request should retrieve a new client instance,
+	// because the ServiceAccount namespace depends on the namespace of the referent
+	client3, cfg3, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "another-namespace", store.GetObjectKind().GroupVersionKind().Kind)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c3 == c1 {
+	_, err = acquireVaultClient(ctx, prov, client3, cfg3, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client3.client == client1.client {
 		t.Fatal("Expected a new client instance")
 	}
 }

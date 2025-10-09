@@ -18,11 +18,14 @@ package vault
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/go-logr/logr"
 	vault "github.com/hashicorp/vault/api"
@@ -39,16 +42,17 @@ import (
 var _ esv1.SecretsClient = &client{}
 
 type client struct {
-	kube      kclient.Client
-	store     *esv1.VaultProvider
-	log       logr.Logger
-	corev1    typedcorev1.CoreV1Interface
-	client    util.Client
-	auth      util.Auth
-	logical   util.Logical
-	token     util.Token
-	namespace string
-	storeKind string
+	kube         kclient.Client
+	store        *esv1.VaultProvider
+	log          logr.Logger
+	corev1       typedcorev1.CoreV1Interface
+	client       util.Client
+	auth         util.Auth
+	logical      util.Logical
+	token        util.Token
+	namespace    string
+	storeKind    string
+	configDigest string
 }
 
 func (c *client) newConfig(ctx context.Context) (*vault.Config, error) {
@@ -119,7 +123,122 @@ func (c *client) configureClientTLS(ctx context.Context, cfg *vault.Config) erro
 	return nil
 }
 
+func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStore) (string, error) {
+	hasher := sha256.New()
+	writePart := func(parts ...string) {
+		for _, p := range parts {
+			_, _ = hasher.Write([]byte(p))
+			_, _ = hasher.Write([]byte{0})
+		}
+	}
+
+	if store != nil {
+		writePart("store-gen", fmt.Sprintf("%d", store.GetGeneration()))
+	}
+
+	if c.store.Namespace != nil {
+		writePart("vault-namespace", *c.store.Namespace)
+	}
+
+	if c.store.ReadYourWrites {
+		writePart("read-your-writes", "true")
+	}
+
+	if c.store.ForwardInconsistent {
+		writePart("forward-inconsistent", "true")
+	}
+
+	if len(c.store.Headers) > 0 {
+		keys := make([]string, 0, len(c.store.Headers))
+		for k := range c.store.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			writePart("header", k, c.store.Headers[k])
+		}
+	}
+
+	if len(c.store.CABundle) > 0 {
+		writePart("ca-bundle-inline")
+		_, _ = hasher.Write(c.store.CABundle)
+		_, _ = hasher.Write([]byte{0})
+	}
+
+	if c.store.CAProvider != nil {
+		cp := c.store.CAProvider
+		ns := c.namespace
+		if cp.Namespace != nil {
+			ns = *cp.Namespace
+		}
+
+		key := kclient.ObjectKey{
+			Name:      cp.Name,
+			Namespace: ns,
+		}
+
+		switch cp.Type {
+		case esv1.CAProviderTypeSecret:
+			secret := &corev1.Secret{}
+			if err := c.kube.Get(ctx, key, secret); err != nil {
+				return "", err
+			}
+			writePart("ca-secret", fmt.Sprintf("%s/%s", key.Namespace, key.Name), fmt.Sprintf("v%s", secret.ResourceVersion))
+		case esv1.CAProviderTypeConfigMap:
+			configMap := &corev1.ConfigMap{}
+			if err := c.kube.Get(ctx, key, configMap); err != nil {
+				return "", err
+			}
+			writePart("ca-configmap", fmt.Sprintf("%s/%s", key.Namespace, key.Name), fmt.Sprintf("v%s", configMap.ResourceVersion))
+		default:
+			return "", fmt.Errorf("unsupported CA provider type: %s", cp.Type)
+		}
+	}
+
+	clientTLS := c.store.ClientTLS
+	if clientTLS.CertSecretRef != nil {
+		ns := c.namespace
+		if clientTLS.CertSecretRef.Namespace != nil {
+			ns = *clientTLS.CertSecretRef.Namespace
+		}
+		if ns == "" {
+			return "", fmt.Errorf("missing namespace for client TLS cert secret %q", clientTLS.CertSecretRef.Name)
+		}
+
+		secret := &corev1.Secret{}
+		if err := c.kube.Get(ctx, kclient.ObjectKey{Namespace: ns, Name: clientTLS.CertSecretRef.Name}, secret); err != nil {
+			return "", err
+		}
+		writePart("tls-cert", fmt.Sprintf("%s/%s", ns, clientTLS.CertSecretRef.Name), fmt.Sprintf("v%s", secret.ResourceVersion))
+	}
+
+	if clientTLS.KeySecretRef != nil {
+		ns := c.namespace
+		if clientTLS.KeySecretRef.Namespace != nil {
+			ns = *clientTLS.KeySecretRef.Namespace
+		}
+		if ns == "" {
+			return "", fmt.Errorf("missing namespace for client TLS key secret %q", clientTLS.KeySecretRef.Name)
+		}
+
+		secret := &corev1.Secret{}
+		if err := c.kube.Get(ctx, kclient.ObjectKey{Namespace: ns, Name: clientTLS.KeySecretRef.Name}, secret); err != nil {
+			return "", err
+		}
+		writePart("tls-key", fmt.Sprintf("%s/%s", ns, clientTLS.KeySecretRef.Name), fmt.Sprintf("v%s", secret.ResourceVersion))
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
 func (c *client) Close(ctx context.Context) error {
+	if enableVaultClientPooling {
+		if _, ok := c.client.(*pooledVaultClient); ok {
+			// Pooled clients are kept alive across reconciliations; eviction handles revocation.
+			return nil
+		}
+	}
+
 	// Revoke the token if we have one set, it wasn't sourced from a TokenSecretRef,
 	// and token caching isn't enabled
 	if !enableCache && c.client.Token() != "" && c.store.Auth != nil && c.store.Auth.TokenSecretRef == nil {

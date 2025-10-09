@@ -139,17 +139,19 @@ func TestSetAuthNamespace(t *testing.T) {
 				t.Error(err.Error())
 			}
 
-			client, err := getVaultClient(prov, tc.args.store, cfg, "default")
+			// Use unified kernel method to acquire client
+			initialized, err := acquireVaultClient(context.Background(), prov, c, cfg, tc.args.store)
 			if err != nil {
-				t.Errorf("vault.useAuthNamespace: failed to create client: %s", err.Error())
+				t.Errorf("vault.useAuthNamespace: failed to acquire client: %s", err.Error())
 			}
 
-			_, err = prov.initClient(context.Background(), c, client, cfg, tc.args.store.Spec.Provider.Vault)
-			if err != nil {
-				t.Errorf("vault.useAuthNamespace: failed to init client: %s", err.Error())
+			// If not initialized (pool miss or non-pooled), initialize the client
+			if !initialized {
+				_, err = prov.initClient(context.Background(), c, c.client, cfg, tc.args.store.Spec.Provider.Vault)
+				if err != nil {
+					t.Errorf("vault.useAuthNamespace: failed to init client: %s", err.Error())
+				}
 			}
-
-			c.client = client
 
 			// before auth
 			actual := result{

@@ -101,6 +101,7 @@ require (
 	github.com/google/go-github/v56 v56.0.0
 	github.com/grafana/grafana-openapi-client-go v0.0.0-20250925215610-d92957c70d5c
 	github.com/hashicorp/golang-lru v1.0.2
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/vault/api/auth/aws v0.10.0
 	github.com/hashicorp/vault/api/auth/userpass v0.10.0
 	github.com/infisical/go-sdk v0.5.100
@@ -212,7 +213,6 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/hashicorp/go-secure-stdlib/awsutil v0.3.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/hcl/v2 v2.24.0 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20250628045327-2d64ad6b7ec5 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect

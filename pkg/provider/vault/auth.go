@@ -193,6 +193,10 @@ func checkToken(ctx context.Context, token util.Token) (bool, error) {
 }
 
 func revokeTokenIfValid(ctx context.Context, client util.Client) error {
+	if client.Token() == "" {
+		return nil
+	}
+
 	valid, err := checkToken(ctx, client.AuthToken())
 	if err != nil {
 		return fmt.Errorf(errVaultRevokeToken, err)
