@@ -333,7 +333,7 @@ func TestGetSecret(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			vStore := &client{
+			vStore := &secretsClient{
 				kube:      tc.args.kube,
 				logical:   tc.args.vLogical,
 				store:     tc.args.store,
@@ -581,7 +581,7 @@ func TestGetSecretMap(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			vStore := &client{
+			vStore := &secretsClient{
 				kube:      tc.args.kube,
 				logical:   tc.args.vClient,
 				store:     tc.args.store,
@@ -687,7 +687,7 @@ func TestGetSecretPath(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			vStore := &client{
+			vStore := &secretsClient{
 				store: tc.args.store,
 			}
 			want := vStore.buildPath(tc.args.path)
@@ -747,7 +747,7 @@ func TestGetSecretMetadataPath(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			vStore := &client{
+			vStore := &secretsClient{
 				store: tc.args.store,
 			}
 
@@ -931,7 +931,7 @@ func TestSecretExists(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			client := &client{
+			client := &secretsClient{
 				logical: tc.args.vClient,
 				store:   tc.args.store,
 			}

@@ -46,15 +46,15 @@ const (
 //     by leaving the ref.Property empty.
 //  2. get a key from the secret.
 //     Nested values are supported by specifying a gjson expression
-func (c *client) GetSecret(ctx context.Context, ref esv1.ExternalSecretDataRemoteRef) ([]byte, error) {
+func (sc *secretsClient) GetSecret(ctx context.Context, ref esv1.ExternalSecretDataRemoteRef) ([]byte, error) {
 	var data map[string]any
 	var err error
 	if ref.MetadataPolicy == esv1.ExternalSecretMetadataPolicyFetch {
-		if c.store.Version == esv1.VaultKVStoreV1 {
+		if sc.store.Version == esv1.VaultKVStoreV1 {
 			return nil, errors.New(errUnsupportedMetadataKvVersion)
 		}
 
-		metadata, err := c.readSecretMetadata(ctx, ref.Key)
+		metadata, err := sc.readSecretMetadata(ctx, ref.Key)
 		if err != nil {
 			return nil, err
 		}
@@ -66,7 +66,7 @@ func (c *client) GetSecret(ctx context.Context, ref esv1.ExternalSecretDataRemot
 			data[k] = v
 		}
 	} else {
-		data, err = c.readSecret(ctx, ref.Key, ref.Version)
+		data, err = sc.readSecret(ctx, ref.Key, ref.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -78,8 +78,8 @@ func (c *client) GetSecret(ctx context.Context, ref esv1.ExternalSecretDataRemot
 // GetSecretMap supports two modes of operation:
 // 1. get the full secret from the vault data payload (by leaving .property empty).
 // 2. extract key/value pairs from a (nested) object.
-func (c *client) GetSecretMap(ctx context.Context, ref esv1.ExternalSecretDataRemoteRef) (map[string][]byte, error) {
-	data, err := c.GetSecret(ctx, ref)
+func (sc *secretsClient) GetSecretMap(ctx context.Context, ref esv1.ExternalSecretDataRemoteRef) (map[string][]byte, error) {
+	data, err := sc.GetSecret(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -100,9 +100,9 @@ func (c *client) GetSecretMap(ctx context.Context, ref esv1.ExternalSecretDataRe
 	return byteMap, nil
 }
 
-func (c *client) SecretExists(ctx context.Context, ref esv1.PushSecretRemoteRef) (bool, error) {
-	path := c.buildPath(ref.GetRemoteKey())
-	data, err := c.readSecret(ctx, path, "")
+func (sc *secretsClient) SecretExists(ctx context.Context, ref esv1.PushSecretRemoteRef) (bool, error) {
+	path := sc.buildPath(ref.GetRemoteKey())
+	data, err := sc.readSecret(ctx, path, "")
 	if err != nil {
 		if errors.Is(err, esv1.NoSecretError{}) {
 			return false, nil
@@ -119,8 +119,8 @@ func (c *client) SecretExists(ctx context.Context, ref esv1.PushSecretRemoteRef)
 	return value != nil, nil
 }
 
-func (c *client) readSecret(ctx context.Context, path, version string) (map[string]any, error) {
-	dataPath := c.buildPath(path)
+func (sc *secretsClient) readSecret(ctx context.Context, path, version string) (map[string]any, error) {
+	dataPath := sc.buildPath(path)
 
 	// path formated according to vault docs for v1 and v2 API
 	// v1: https://www.vaultproject.io/api-docs/secret/kv/kv-v1#read-secret
@@ -130,7 +130,7 @@ func (c *client) readSecret(ctx context.Context, path, version string) (map[stri
 		params = make(map[string][]string)
 		params["version"] = []string{version}
 	}
-	vaultSecret, err := c.logical.ReadWithDataWithContext(ctx, dataPath, params)
+	vaultSecret, err := sc.logical.ReadWithDataWithContext(ctx, dataPath, params)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultReadSecretData, err)
 	if err != nil {
 		return nil, fmt.Errorf(errReadSecret, err)
@@ -139,7 +139,7 @@ func (c *client) readSecret(ctx context.Context, path, version string) (map[stri
 		return nil, esv1.NoSecretError{}
 	}
 	secretData := vaultSecret.Data
-	if c.store.Version == esv1.VaultKVStoreV2 {
+	if sc.store.Version == esv1.VaultKVStoreV2 {
 		// Vault KV2 has data embedded within sub-field
 		// reference - https://www.vaultproject.io/api/secret/kv/kv-v2#read-secret-version
 		dataInt, ok := vaultSecret.Data["data"]
@@ -186,13 +186,13 @@ func getSecretValue(data map[string]any, property string) ([]byte, error) {
 	return []byte(val.String()), nil
 }
 
-func (c *client) readSecretMetadata(ctx context.Context, path string) (map[string]string, error) {
+func (sc *secretsClient) readSecretMetadata(ctx context.Context, path string) (map[string]string, error) {
 	metadata := make(map[string]string)
-	url, err := c.buildMetadataPath(path)
+	url, err := sc.buildMetadataPath(path)
 	if err != nil {
 		return nil, err
 	}
-	secret, err := c.logical.ReadWithDataWithContext(ctx, url, nil)
+	secret, err := sc.logical.ReadWithDataWithContext(ctx, url, nil)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultReadSecretData, err)
 	if err != nil {
 		return nil, fmt.Errorf(errReadSecret, err)
@@ -214,19 +214,19 @@ func (c *client) readSecretMetadata(ctx context.Context, path string) (map[strin
 	return metadata, nil
 }
 
-func (c *client) buildMetadataPath(path string) (string, error) {
+func (sc *secretsClient) buildMetadataPath(path string) (string, error) {
 	var url string
-	if c.store.Version == esv1.VaultKVStoreV1 {
-		url = fmt.Sprintf("%s/%s", *c.store.Path, path)
+	if sc.store.Version == esv1.VaultKVStoreV1 {
+		url = fmt.Sprintf("%s/%s", *sc.store.Path, path)
 	} else { // KV v2 is used
-		if c.store.Path == nil && !strings.Contains(path, "data") {
+		if sc.store.Path == nil && !strings.Contains(path, "data") {
 			return "", errors.New(errPathInvalid)
 		}
-		if c.store.Path == nil {
+		if sc.store.Path == nil {
 			path = strings.Replace(path, "/data/", "/metadata/", 1)
 			url = path
 		} else {
-			url = fmt.Sprintf("%s/metadata/%s", *c.store.Path, path)
+			url = fmt.Sprintf("%s/metadata/%s", *sc.store.Path, path)
 		}
 	}
 	return url, nil
@@ -273,8 +273,8 @@ func (c *client) buildMetadataPath(path string) (string, error) {
 			input: "secret/path/foo"
 			output: "secret/path/foo" #noop
 */
-func (c *client) buildPath(path string) string {
-	optionalMount := c.store.Path
+func (sc *secretsClient) buildPath(path string) string {
+	optionalMount := sc.store.Path
 	out := path
 	// if optionalMount is Set, remove it from path if its there
 	if optionalMount != nil {
@@ -283,20 +283,20 @@ func (c *client) buildPath(path string) string {
 			// This current logic induces a bug when the actual secret resides on same path names as the mount path.
 			_, out, _ = strings.Cut(out, cut)
 			// if data succeeds optionalMount on v2 store, we should remove it as well
-			if strings.HasPrefix(out, "data/") && c.store.Version == esv1.VaultKVStoreV2 {
+			if strings.HasPrefix(out, "data/") && sc.store.Version == esv1.VaultKVStoreV2 {
 				_, out, _ = strings.Cut(out, "data/")
 			}
 		}
 		buildPath := strings.Split(out, "/")
 		buildMount := strings.Split(*optionalMount, "/")
-		if c.store.Version == esv1.VaultKVStoreV2 {
+		if sc.store.Version == esv1.VaultKVStoreV2 {
 			buildMount = append(buildMount, "data")
 		}
 		buildMount = append(buildMount, buildPath...)
 		out = strings.Join(buildMount, "/")
 		return out
 	}
-	if !strings.Contains(out, "/data/") && c.store.Version == esv1.VaultKVStoreV2 {
+	if !strings.Contains(out, "/data/") && sc.store.Version == esv1.VaultKVStoreV2 {
 		buildPath := strings.Split(out, "/")
 		buildMount := []string{buildPath[0], "data"}
 		buildMount = append(buildMount, buildPath[1:]...)

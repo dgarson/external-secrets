@@ -347,7 +347,7 @@ func TestGetAllSecrets(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			vStore := &client{
+			vStore := &secretsClient{
 				kube:      tc.args.kube,
 				logical:   tc.args.vLogical,
 				store:     tc.args.store,

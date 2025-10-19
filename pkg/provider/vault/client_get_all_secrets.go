@@ -35,29 +35,29 @@ const (
 // GetAllSecrets gets multiple secrets from the provider and loads into a kubernetes secret.
 // First load all secrets from secretStore path configuration
 // Then, gets secrets from a matching name or matching custom_metadata.
-func (c *client) GetAllSecrets(ctx context.Context, ref esv1.ExternalSecretFind) (map[string][]byte, error) {
-	if c.store.Version == esv1.VaultKVStoreV1 && ref.Tags != nil {
+func (sc *secretsClient) GetAllSecrets(ctx context.Context, ref esv1.ExternalSecretFind) (map[string][]byte, error) {
+	if sc.store.Version == esv1.VaultKVStoreV1 && ref.Tags != nil {
 		return nil, errors.New(errUnsupportedKvVersion)
 	}
 	searchPath := ""
 	if ref.Path != nil {
 		searchPath = *ref.Path + "/"
 	}
-	potentialSecrets, err := c.listSecrets(ctx, searchPath)
+	potentialSecrets, err := sc.listSecrets(ctx, searchPath)
 	if err != nil {
 		return nil, err
 	}
 	if ref.Name != nil {
-		return c.findSecretsFromName(ctx, potentialSecrets, *ref.Name)
+		return sc.findSecretsFromName(ctx, potentialSecrets, *ref.Name)
 	}
-	return c.findSecretsFromTags(ctx, potentialSecrets, ref.Tags)
+	return sc.findSecretsFromTags(ctx, potentialSecrets, ref.Tags)
 }
 
-func (c *client) findSecretsFromTags(ctx context.Context, candidates []string, tags map[string]string) (map[string][]byte, error) {
+func (sc *secretsClient) findSecretsFromTags(ctx context.Context, candidates []string, tags map[string]string) (map[string][]byte, error) {
 	secrets := make(map[string][]byte)
 	for _, name := range candidates {
 		match := true
-		metadata, err := c.readSecretMetadata(ctx, name)
+		metadata, err := sc.readSecretMetadata(ctx, name)
 		if err != nil {
 			return nil, err
 		}
@@ -69,7 +69,7 @@ func (c *client) findSecretsFromTags(ctx context.Context, candidates []string, t
 			}
 		}
 		if match {
-			secret, err := c.GetSecret(ctx, esv1.ExternalSecretDataRemoteRef{Key: name})
+			secret, err := sc.GetSecret(ctx, esv1.ExternalSecretDataRemoteRef{Key: name})
 			if errors.Is(err, esv1.NoSecretError{}) {
 				continue
 			}
@@ -84,7 +84,7 @@ func (c *client) findSecretsFromTags(ctx context.Context, candidates []string, t
 	return secrets, nil
 }
 
-func (c *client) findSecretsFromName(ctx context.Context, candidates []string, ref esv1.FindName) (map[string][]byte, error) {
+func (sc *secretsClient) findSecretsFromName(ctx context.Context, candidates []string, ref esv1.FindName) (map[string][]byte, error) {
 	secrets := make(map[string][]byte)
 	matcher, err := find.New(ref)
 	if err != nil {
@@ -93,7 +93,7 @@ func (c *client) findSecretsFromName(ctx context.Context, candidates []string, r
 	for _, name := range candidates {
 		ok := matcher.MatchName(name)
 		if ok {
-			secret, err := c.GetSecret(ctx, esv1.ExternalSecretDataRemoteRef{Key: name})
+			secret, err := sc.GetSecret(ctx, esv1.ExternalSecretDataRemoteRef{Key: name})
 			if errors.Is(err, esv1.NoSecretError{}) {
 				continue
 			}
@@ -108,13 +108,13 @@ func (c *client) findSecretsFromName(ctx context.Context, candidates []string, r
 	return secrets, nil
 }
 
-func (c *client) listSecrets(ctx context.Context, path string) ([]string, error) {
+func (sc *secretsClient) listSecrets(ctx context.Context, path string) ([]string, error) {
 	secrets := make([]string, 0)
-	url, err := c.buildMetadataPath(path)
+	url, err := sc.buildMetadataPath(path)
 	if err != nil {
 		return nil, err
 	}
-	secret, err := c.logical.ListWithContext(ctx, url)
+	secret, err := sc.logical.ListWithContext(ctx, url)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultListSecrets, err)
 	if err != nil {
 		return nil, fmt.Errorf(errReadSecret, err)
@@ -137,7 +137,7 @@ func (c *client) listSecrets(ctx context.Context, path string) ([]string, error)
 		if !strings.HasSuffix(p.(string), "/") {
 			secrets = append(secrets, fullPath)
 		} else {
-			partial, err := c.listSecrets(ctx, fullPath)
+			partial, err := sc.listSecrets(ctx, fullPath)
 			if err != nil {
 				return nil, err
 			}

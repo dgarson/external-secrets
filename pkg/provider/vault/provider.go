@@ -106,30 +106,28 @@ func (p *Provider) NewClient(ctx context.Context, store esv1.GenericStore, kube 
 }
 
 func (p *Provider) NewGeneratorClient(ctx context.Context, kube kclient.Client, corev1 typedcorev1.CoreV1Interface, vaultSpec *esv1.VaultProvider, namespace string, retrySettings *esv1.SecretStoreRetrySettings) (util.Client, error) {
-	vStore, cfg, err := p.prepareConfig(ctx, kube, corev1, vaultSpec, retrySettings, namespace, resolvers.EmptyStoreKind)
+	// Build auth context
+	authCtx := newAuthContext(
+		vaultSpec,
+		kube,
+		corev1,
+		namespace,
+		resolvers.EmptyStoreKind,
+	)
+
+	// Build config
+	cfg, err := buildVaultConfigFromContext(ctx, authCtx, retrySettings)
 	if err != nil {
 		return nil, err
 	}
 
-	// Use unified kernel method to acquire client (pass nil for store in generator path)
-	initialized, err := acquireVaultClient(ctx, p, vStore, cfg, nil)
+	// Acquire fully-ready client (pass nil for store in generator path)
+	vaultClient, err := p.acquireVaultClient(ctx, authCtx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// If pool hit, client is fully initialized - return immediately
-	if initialized {
-		return vStore.client, nil
-	}
-
-	// Pool miss or non-pooled - needs initialization
-	_, err = p.initClient(ctx, vStore, vStore.client, cfg, vaultSpec)
-	if err != nil {
-		return nil, err
-	}
-
-	// Return the potentially pooled client from vStore
-	return vStore.client, nil
+	return vaultClient, nil // Ready to use!
 }
 
 func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube kclient.Client, corev1 typedcorev1.CoreV1Interface, namespace string) (esv1.SecretsClient, error) {
@@ -139,193 +137,252 @@ func (p *Provider) newClient(ctx context.Context, store esv1.GenericStore, kube 
 	}
 	vaultSpec := storeSpec.Provider.Vault
 
-	vStore, cfg, err := p.prepareConfig(
-		ctx,
+	// Build auth context
+	authCtx := newAuthContext(
+		vaultSpec,
 		kube,
 		corev1,
-		vaultSpec,
-		storeSpec.RetrySettings,
 		namespace,
-		store.GetObjectKind().GroupVersionKind().Kind)
+		store.GetObjectKind().GroupVersionKind().Kind,
+	)
+
+	// Build Vault config
+	cfg, err := buildVaultConfigFromContext(ctx, authCtx, storeSpec.RetrySettings)
 	if err != nil {
 		return nil, err
 	}
 
-	// Use unified kernel method to acquire client
-	initialized, err := acquireVaultClient(ctx, p, vStore, cfg, store)
+	// Acquire fully-ready Vault client (always returns ready client!)
+	vaultClient, err := p.acquireVaultClient(ctx, authCtx, cfg, store)
 	if err != nil {
 		return nil, fmt.Errorf(errVaultClient, err)
 	}
 
-	// If pool hit, client is fully initialized - return immediately
-	if initialized {
-		return vStore, nil
-	}
-
-	// Pool miss or non-pooled - needs initialization
-	return p.initClient(ctx, vStore, vStore.client, cfg, vaultSpec)
-}
-
-func (p *Provider) initClient(ctx context.Context, c *client, client util.Client, cfg *vault.Config, vaultSpec *esv1.VaultProvider) (esv1.SecretsClient, error) {
-	// Check if pooling is enabled
-	if enableVaultClientPooling {
-		return p.authenticateAndPoolClient(ctx, c, client, cfg, vaultSpec)
-	}
-
-	// Existing non-pooled behavior
-	return p.initClientNonPooled(ctx, c, client, cfg, vaultSpec)
-}
-
-// initClientNonPooled handles non-pooled client initialization (existing logic)
-func (p *Provider) initClientNonPooled(ctx context.Context, c *client, client util.Client, cfg *vault.Config, vaultSpec *esv1.VaultProvider) (esv1.SecretsClient, error) {
-	// Configure client with common settings
-	configureVaultClient(client, vaultSpec)
-
-	c.client = client
-	c.auth = client.Auth()
-	c.logical = client.Logical()
-	c.token = client.AuthToken()
-
-	// allow SecretStore controller validation to pass
-	// when using referent namespace.
-	if c.storeKind == esv1.ClusterSecretStoreKind && c.namespace == "" && isReferentSpec(vaultSpec) {
-		return c, nil
-	}
-	if err := c.setAuth(ctx, cfg); err != nil {
-		return nil, err
-	}
-
-	return c, nil
-}
-
-// authenticateAndPoolClient handles pooled client initialization.
-//
-// This function implements a double-checked locking optimization for concurrent requests:
-//
-//  1. First check in acquireVaultClient() (fast path for existing pooled clients)
-//  2. Second check here (catches clients added by concurrent requests)
-//
-// The second check is intentional and beneficial for concurrency:
-//   - Between first check (miss) and second check, another goroutine may authenticate
-//   - Second check allows us to use that authentication instead of duplicating work
-//   - Race window is narrow (only during client creation and config)
-//   - Duplicate authentication is wasteful but not incorrect (last-write-wins)
-func (p *Provider) authenticateAndPoolClient(ctx context.Context, c *client, client util.Client, cfg *vault.Config, vaultSpec *esv1.VaultProvider) (esv1.SecretsClient, error) {
-	// Generate identity-based cache key
-	authIdentity, err := getAuthIdentity(ctx, vaultSpec.Auth, c.kube, c.namespace)
-	if err != nil {
-		c.log.Error(err, "Failed to get auth identity, falling back to non-pooled")
-		return p.initClientNonPooled(ctx, c, client, cfg, vaultSpec)
-	}
-
-	cacheKey := buildCacheKey(vaultSpec, authIdentity)
-
-	// SECOND POOL CHECK (concurrent request optimization)
-	// If another goroutine authenticated while we were creating the client, use theirs
-	if pooledClient, ok := vaultClientPool.Get(cacheKey); ok {
-		if pooledClient.configDigest != c.configDigest {
-			c.log.V(1).Info("Invalidated pooled client due to configuration change on second check", "cacheKey", cacheKey)
-			removePooledClient(cacheKey)
-		} else {
-			poolCacheHits.Inc()
-			c.log.V(1).Info("Pool hit on second check, using existing authenticated client", "cacheKey", cacheKey)
-
-			c.client = pooledClient
-			c.auth = pooledClient.Auth()
-			c.logical = pooledClient.Logical() // Returns logicalWithRetry wrapper
-			c.token = pooledClient.AuthToken()
-
-			return c, nil
-		}
-	}
-
-	// Pool miss - authenticate and store
-	poolCacheMisses.Inc()
-	c.log.V(1).Info("Pool miss, authenticating and caching client", "cacheKey", cacheKey)
-
-	// Configure client with common settings
-	configureVaultClient(client, vaultSpec)
-
-	c.client = client
-	c.auth = client.Auth()
-	c.logical = client.Logical()
-	c.token = client.AuthToken()
-
-	// allow SecretStore controller validation to pass
-	// when using referent namespace.
-	if c.storeKind == esv1.ClusterSecretStoreKind && c.namespace == "" && isReferentSpec(vaultSpec) {
-		return c, nil
-	}
-
-	// Authenticate
-	if err := c.setAuth(ctx, cfg); err != nil {
-		return nil, err
-	}
-
-	// Wrap and store in pool
-	vaultClient, ok := client.(*util.VaultClient)
-	if !ok {
-		c.log.Error(fmt.Errorf("unexpected client type"), "Cannot pool client")
-		return c, nil
-	}
-
-	pooledClient := &pooledVaultClient{
-		client:          vaultClient,
-		cacheKey:        cacheKey,
-		cfg:             cfg,
-		setAuth:         c.setAuth,
-		lastAuth:        time.Now(),
-		configDigest:    c.configDigest,
-		skipTokenRevoke: vaultSpec.Auth == nil || vaultSpec.Auth.TokenSecretRef != nil,
-	}
-
-	vaultClientPool.Add(cacheKey, pooledClient)
-	poolCacheSize.Set(float64(vaultClientPool.Len()))
-
-	// Update client references to use pooled version
-	c.client = pooledClient
-	c.logical = pooledClient.Logical() // Returns logicalWithRetry wrapper
-
-	c.log.V(1).Info("Stored client in pool", "cacheKey", cacheKey)
-
-	return c, nil
-}
-
-func (p *Provider) prepareConfig(ctx context.Context, kube kclient.Client, corev1 typedcorev1.CoreV1Interface, vaultSpec *esv1.VaultProvider, retrySettings *esv1.SecretStoreRetrySettings, namespace, storeKind string) (*client, *vault.Config, error) {
-	c := &client{
+	// Wrap in secretsClient struct (ESO business logic)
+	sc := &secretsClient{
+		client:    vaultClient, // Already fully initialized!
 		kube:      kube,
 		corev1:    corev1,
 		store:     vaultSpec,
-		log:       logger,
 		namespace: namespace,
-		storeKind: storeKind,
+		storeKind: authCtx.storeKind,
+		log:       logger,
 	}
 
-	cfg, err := c.newConfig(ctx)
+	// Set helper fields
+	sc.auth = vaultClient.Auth()
+	sc.logical = vaultClient.Logical()
+	sc.token = vaultClient.AuthToken()
+
+	return sc, nil
+}
+
+// tryPooledClient checks the pool and returns a cached client if valid.
+// Returns (client, nil) on hit, (nil, nil) on miss, (nil, err) on error.
+func tryPooledClient(
+	ctx context.Context,
+	authCtx *authContext,
+	store esv1.GenericStore,
+) (*pooledVaultClient, error) {
+	if !enableVaultClientPooling {
+		return nil, nil
+	}
+
+	// Compute cache key
+	authIdentity, err := getAuthIdentity(ctx, authCtx.spec.Auth, authCtx.kube, authCtx.namespace)
 	if err != nil {
-		return nil, nil, err
+		logger.V(1).Info("Failed to get auth identity for pooling", "error", err)
+		return nil, nil // Not an error, just skip pooling
 	}
 
-	// Setup retry options if present
-	if retrySettings != nil {
-		if retrySettings.MaxRetries != nil {
-			cfg.MaxRetries = int(*retrySettings.MaxRetries)
-		} else {
-			// By default we rely only on the reconciliation process for retrying
-			cfg.MaxRetries = 0
-		}
+	cacheKey := buildCacheKey(authCtx.spec, authIdentity)
 
-		if retrySettings.RetryInterval != nil {
-			retryWait, err := time.ParseDuration(*retrySettings.RetryInterval)
-			if err != nil {
-				return nil, nil, err
-			}
-			cfg.MinRetryWait = retryWait
-			cfg.MaxRetryWait = retryWait
-		}
+	// Compute config digest for invalidation check (even with nil store)
+	configDigest, err := computeVaultConfigDigest(ctx, authCtx, store)
+	if err != nil {
+		return nil, err
 	}
 
-	return c, cfg, nil
+	// Check pool
+	if pooled, ok := vaultClientPool.Get(cacheKey); ok {
+		if pooled.configDigest != configDigest {
+			logger.V(1).Info("Invalidated pooled client due to config change", "cacheKey", cacheKey)
+			removePooledClient(cacheKey)
+			return nil, nil // Cache invalidated
+		}
+
+		poolCacheHits.Inc()
+		logger.V(1).Info("Pool hit, using existing client", "cacheKey", cacheKey)
+		return pooled, nil // Hit!
+	}
+
+	// Miss
+	return nil, nil
+}
+
+// createPooledClient creates a NEW pooled client, authenticates it, and caches it.
+// Returns a FULLY INITIALIZED client ready to use.
+func createPooledClient(
+	ctx context.Context,
+	p *Provider,
+	authCtx *authContext,
+	cfg *vault.Config,
+	store esv1.GenericStore,
+) (*pooledVaultClient, error) {
+	// Compute cache key and config digest
+	authIdentity, err := getAuthIdentity(ctx, authCtx.spec.Auth, authCtx.kube, authCtx.namespace)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := buildCacheKey(authCtx.spec, authIdentity)
+
+	configDigest, err := computeVaultConfigDigest(ctx, authCtx, store)
+	if err != nil {
+		return nil, err
+	}
+
+	poolCacheMisses.Inc()
+	logger.V(1).Info("Pool miss, creating and caching client", "cacheKey", cacheKey)
+
+	// 1. Create Vault SDK client
+	vaultSDK, err := p.NewVaultClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Configure (namespace, headers, read-your-writes)
+	configureVaultClient(vaultSDK, authCtx.spec)
+
+	// 3. Allow ClusterSecretStore validation with referent namespace
+	if authCtx.storeKind == esv1.ClusterSecretStoreKind && authCtx.namespace == "" && isReferentSpec(authCtx.spec) {
+		// For ClusterSecretStore with referent spec, don't authenticate yet
+		// This allows validation to pass
+		vaultClient := vaultSDK.(*util.VaultClient)
+		pooled := &pooledVaultClient{
+			vault:           vaultClient,
+			authContext:     authCtx,
+			cfg:             cfg,
+			cacheKey:        cacheKey,
+			lastAuth:        time.Now(),
+			configDigest:    configDigest,
+			skipTokenRevoke: authCtx.spec.Auth == nil || authCtx.spec.Auth.TokenSecretRef != nil,
+		}
+		vaultClientPool.Add(cacheKey, pooled)
+		poolCacheSize.Set(float64(vaultClientPool.Len()))
+		return pooled, nil
+	}
+
+	// 4. Authenticate (standalone function)
+	if err := authenticateVault(ctx, vaultSDK, authCtx, cfg); err != nil {
+		return nil, err
+	}
+
+	// 5. Wrap in pooled client
+	vaultClient := vaultSDK.(*util.VaultClient)
+	pooled := &pooledVaultClient{
+		vault:           vaultClient,
+		authContext:     authCtx,
+		cfg:             cfg,
+		cacheKey:        cacheKey,
+		lastAuth:        time.Now(),
+		configDigest:    configDigest,
+		skipTokenRevoke: authCtx.spec.Auth == nil || authCtx.spec.Auth.TokenSecretRef != nil,
+	}
+
+	// 6. Cache
+	vaultClientPool.Add(cacheKey, pooled)
+	poolCacheSize.Set(float64(vaultClientPool.Len()))
+
+	logger.V(1).Info("Stored client in pool", "cacheKey", cacheKey)
+	return pooled, nil
+}
+
+// createStandaloneClient creates a non-pooled client.
+// Returns a FULLY INITIALIZED client ready to use.
+func createStandaloneClient(
+	ctx context.Context,
+	p *Provider,
+	authCtx *authContext,
+	cfg *vault.Config,
+	store esv1.GenericStore,
+) (util.Client, error) {
+	// 1. Create Vault SDK client
+	vaultSDK, err := p.NewVaultClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Configure
+	configureVaultClient(vaultSDK, authCtx.spec)
+
+	// 3. Allow ClusterSecretStore validation with referent namespace
+	if authCtx.storeKind == esv1.ClusterSecretStoreKind && authCtx.namespace == "" && isReferentSpec(authCtx.spec) {
+		return vaultSDK, nil
+	}
+
+	// 4. Authenticate
+	if err := authenticateVault(ctx, vaultSDK, authCtx, cfg); err != nil {
+		return nil, err
+	}
+
+	// 5. Add to old cache if applicable
+	if !enableVaultClientPooling && store != nil && enableCache {
+		addToOldCache(store, authCtx, vaultSDK)
+	}
+
+	return vaultSDK, nil
+}
+
+// addToOldCache adds a client to the old cache system (when pooling disabled).
+func addToOldCache(store esv1.GenericStore, authCtx *authContext, vaultClient util.Client) {
+	if authCtx.spec.Auth != nil && authCtx.spec.Auth.TokenSecretRef != nil {
+		// Don't cache static tokens
+		return
+	}
+
+	keyNamespace := store.GetObjectMeta().Namespace
+	if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && authCtx.namespace != "" && isReferentSpec(authCtx.spec) {
+		keyNamespace = authCtx.namespace
+	}
+
+	key := cache.Key{
+		Name:      store.GetObjectMeta().Name,
+		Namespace: keyNamespace,
+		Kind:      store.GetTypeMeta().Kind,
+	}
+
+	if !clientCache.Contains(key) {
+		clientCache.Add(store.GetObjectMeta().ResourceVersion, key, vaultClient)
+	}
+}
+
+// tryOldCache checks the old cache system and returns client if found.
+func tryOldCache(store esv1.GenericStore, authCtx *authContext) (util.Client, bool) {
+	if !enableCache {
+		return nil, false
+	}
+
+	// Don't cache static tokens
+	if authCtx.spec.Auth != nil && authCtx.spec.Auth.TokenSecretRef != nil {
+		return nil, false
+	}
+
+	keyNamespace := store.GetObjectMeta().Namespace
+	if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && authCtx.namespace != "" && isReferentSpec(authCtx.spec) {
+		keyNamespace = authCtx.namespace
+	}
+
+	key := cache.Key{
+		Name:      store.GetObjectMeta().Name,
+		Namespace: keyNamespace,
+		Kind:      store.GetTypeMeta().Kind,
+	}
+
+	if client, ok := clientCache.Get(store.GetObjectMeta().ResourceVersion, key); ok {
+		return client, true
+	}
+
+	return nil, false
 }
 
 // configureVaultClient applies common configuration to a Vault client.
@@ -346,130 +403,77 @@ func configureVaultClient(client util.Client, vaultSpec *esv1.VaultProvider) {
 	}
 }
 
-// acquireVaultClient is the unified kernel method for obtaining Vault clients.
-// It handles pool lookups (when pooling enabled), old cache lookups (when pooling disabled),
-// and fresh client creation. Returns (fullyInitialized bool, error).
-//
-// When fullyInitialized=true, the client in c.client is ready to use (skip initClient).
-// When fullyInitialized=false, the client needs initialization via initClient.
-//
-// Parameters:
-//   - ctx: Context for Kubernetes API calls
-//   - p: Provider instance
-//   - c: Client wrapper struct (from prepareConfig) containing kube, namespace, etc.
-//   - cfg: Vault configuration
-//   - store: GenericStore (nil for generator path)
-func acquireVaultClient(ctx context.Context, p *Provider, c *client, cfg *vault.Config, store esv1.GenericStore) (bool, error) {
-	vaultSpec := c.store
-
-	// POOLING PATH: Check pool first when pooling is enabled
-	if enableVaultClientPooling {
-		configDigest, err := c.computeConfigDigest(ctx, store)
-		if err != nil {
-			return false, err
-		}
-		c.configDigest = configDigest
-
-		authIdentity, err := getAuthIdentity(ctx, vaultSpec.Auth, c.kube, c.namespace)
-		if err != nil {
-			c.log.V(1).Info("Failed to get auth identity for pooling, falling back to non-pooled path")
-			// Fall through to non-pooled logic
-		} else {
-			cacheKey := buildCacheKey(vaultSpec, authIdentity)
-
-			// FIRST POOL CHECK (fast path for existing pooled clients)
-			if pooledClient, ok := vaultClientPool.Get(cacheKey); ok {
-				if pooledClient.configDigest != c.configDigest {
-					c.log.V(1).Info("Invalidated pooled client due to configuration change", "cacheKey", cacheKey)
-					removePooledClient(cacheKey)
-				} else {
-					poolCacheHits.Inc()
-					c.log.V(1).Info("Pool hit in acquireVaultClient, using existing authenticated client", "cacheKey", cacheKey)
-
-					// Configure wrapper struct with pooled client
-					c.client = pooledClient
-					c.auth = pooledClient.Auth()
-					c.logical = pooledClient.Logical() // Returns logicalWithRetry wrapper
-					c.token = pooledClient.AuthToken()
-
-					return true, nil // Skip initClient - already fully initialized
-				}
-			}
-
-			c.log.V(1).Info("Pool miss in acquireVaultClient, will create and authenticate new client", "cacheKey", cacheKey)
-			// Fall through to create new client (will be pooled in authenticateAndPoolClient)
-		}
-	}
-
-	// NON-POOLED PATH / POOL MISS: Use old cache or create fresh client
-	// Old cache is only used when pooling is disabled AND store is provided
-	if !enableVaultClientPooling && store != nil {
-		vaultProvider := store.GetSpec().Provider.Vault
-		auth := vaultProvider.Auth
-		isStaticToken := auth != nil && auth.TokenSecretRef != nil
-		useCache := enableCache && !isStaticToken
-
-		if useCache {
-			keyNamespace := store.GetObjectMeta().Namespace
-			// A single ClusterSecretStore may need to spawn separate vault clients for each namespace
-			if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && c.namespace != "" && isReferentSpec(vaultProvider) {
-				keyNamespace = c.namespace
-			}
-
-			key := cache.Key{
-				Name:      store.GetObjectMeta().Name,
-				Namespace: keyNamespace,
-				Kind:      store.GetTypeMeta().Kind,
-			}
-
-			if client, ok := clientCache.Get(store.GetObjectMeta().ResourceVersion, key); ok {
-				c.log.V(1).Info("Old cache hit")
-				c.client = client
-				c.auth = client.Auth()
-				c.logical = client.Logical()
-				c.token = client.AuthToken()
-				return false, nil // Needs initClient for authentication
-			}
-		}
-	}
-
-	// Create fresh client (for pool miss, non-pooled, or generator path)
-	client, err := p.NewVaultClient(cfg)
+// buildVaultConfigFromContext builds Vault configuration from authContext.
+func buildVaultConfigFromContext(
+	ctx context.Context,
+	authCtx *authContext,
+	retrySettings *esv1.SecretStoreRetrySettings,
+) (*vault.Config, error) {
+	cfg, err := buildVaultConfig(ctx, authCtx)
 	if err != nil {
-		return false, fmt.Errorf(errVaultClient, err)
+		return nil, err
 	}
 
-	// Set wrapper fields
-	c.client = client
-	c.auth = client.Auth()
-	c.logical = client.Logical()
-	c.token = client.AuthToken()
+	// Setup retry options
+	if retrySettings != nil {
+		if retrySettings.MaxRetries != nil {
+			cfg.MaxRetries = int(*retrySettings.MaxRetries)
+		} else {
+			cfg.MaxRetries = 0
+		}
 
-	// Add to old cache if applicable (non-pooled path with store)
-	if !enableVaultClientPooling && store != nil && enableCache {
-		vaultProvider := store.GetSpec().Provider.Vault
-		auth := vaultProvider.Auth
-		isStaticToken := auth != nil && auth.TokenSecretRef != nil
-
-		if !isStaticToken {
-			keyNamespace := store.GetObjectMeta().Namespace
-			if store.GetTypeMeta().Kind == esv1.ClusterSecretStoreKind && c.namespace != "" && isReferentSpec(vaultProvider) {
-				keyNamespace = c.namespace
+		if retrySettings.RetryInterval != nil {
+			retryWait, err := time.ParseDuration(*retrySettings.RetryInterval)
+			if err != nil {
+				return nil, err
 			}
-
-			key := cache.Key{
-				Name:      store.GetObjectMeta().Name,
-				Namespace: keyNamespace,
-				Kind:      store.GetTypeMeta().Kind,
-			}
-
-			if !clientCache.Contains(key) {
-				clientCache.Add(store.GetObjectMeta().ResourceVersion, key, client)
-			}
+			cfg.MinRetryWait = retryWait
+			cfg.MaxRetryWait = retryWait
 		}
 	}
 
-	return false, nil // Needs initClient for configuration and authentication
+	return cfg, nil
+}
+
+// acquireVaultClient returns a FULLY INITIALIZED Vault client.
+// The returned client is always ready to use - no additional initialization needed.
+//
+// The function:
+// 1. Checks the pool for an existing client (if pooling enabled)
+// 2. Checks the old cache (if old cache enabled and pooling disabled)
+// 3. Creates a new client (pooled or standalone)
+//
+// In all cases, the returned client is fully configured and authenticated.
+func (p *Provider) acquireVaultClient(
+	ctx context.Context,
+	authCtx *authContext,
+	cfg *vault.Config,
+	store esv1.GenericStore,
+) (util.Client, error) {
+
+	// Try pool first (if enabled)
+	pooled, err := tryPooledClient(ctx, authCtx, store)
+	if err != nil {
+		return nil, err
+	}
+	if pooled != nil {
+		return pooled, nil // Pool hit - fully initialized!
+	}
+
+	// Try old cache (if pooling disabled and store provided)
+	if !enableVaultClientPooling && store != nil {
+		cached, hit := tryOldCache(store, authCtx)
+		if hit {
+			logger.V(1).Info("Old cache hit")
+			return cached, nil
+		}
+	}
+
+	// Create new client (pooled or standalone)
+	if enableVaultClientPooling && store != nil {
+		return createPooledClient(ctx, p, authCtx, cfg, store)
+	}
+	return createStandaloneClient(ctx, p, authCtx, cfg, store)
 }
 
 func isReferentSpec(prov *esv1.VaultProvider) bool {

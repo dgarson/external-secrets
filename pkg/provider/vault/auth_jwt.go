@@ -25,6 +25,7 @@ import (
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	"github.com/external-secrets/external-secrets/pkg/constants"
 	"github.com/external-secrets/external-secrets/pkg/metrics"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
@@ -32,10 +33,14 @@ const (
 	errJwtNoTokenSource = "neither `secretRef` nor `kubernetesServiceAccountToken` was supplied as token source for jwt authentication"
 )
 
-func setJwtAuthToken(ctx context.Context, v *client) (bool, error) {
-	jwtAuth := v.store.Auth.Jwt
+func setJwtAuthToken(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+) (bool, error) {
+	jwtAuth := authCtx.spec.Auth.Jwt
 	if jwtAuth != nil {
-		err := v.requestTokenWithJwtAuth(ctx, jwtAuth)
+		err := requestTokenWithJwtAuth(ctx, vaultClient, authCtx, jwtAuth)
 		if err != nil {
 			return true, err
 		}
@@ -44,12 +49,17 @@ func setJwtAuthToken(ctx context.Context, v *client) (bool, error) {
 	return false, nil
 }
 
-func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.VaultJwtAuth) error {
+func requestTokenWithJwtAuth(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	jwtAuth *esv1.VaultJwtAuth,
+) error {
 	role := strings.TrimSpace(jwtAuth.Role)
 	var jwt string
 	var err error
 	if jwtAuth.SecretRef != nil {
-		jwt, err = resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, jwtAuth.SecretRef)
+		jwt, err = resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, jwtAuth.SecretRef)
 	} else if k8sServiceAccountToken := jwtAuth.KubernetesServiceAccountToken; k8sServiceAccountToken != nil {
 		audiences := k8sServiceAccountToken.Audiences
 		if audiences == nil {
@@ -62,9 +72,9 @@ func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.Vaul
 		}
 		jwt, err = createServiceAccountToken(
 			ctx,
-			c.corev1,
-			c.storeKind,
-			c.namespace,
+			authCtx.corev1,
+			authCtx.storeKind,
+			authCtx.namespace,
 			k8sServiceAccountToken.ServiceAccountRef,
 			*audiences,
 			*expirationSeconds)
@@ -80,7 +90,7 @@ func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.Vaul
 		"jwt":  jwt,
 	}
 	url := strings.Join([]string{"auth", jwtAuth.Path, "login"}, "/")
-	vaultResult, err := c.logical.WriteWithContext(ctx, url, parameters)
+	vaultResult, err := vaultClient.Logical().WriteWithContext(ctx, url, parameters)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
 	if err != nil {
 		return err
@@ -90,6 +100,6 @@ func (c *client) requestTokenWithJwtAuth(ctx context.Context, jwtAuth *esv1.Vaul
 	if err != nil {
 		return fmt.Errorf(errVaultToken, err)
 	}
-	c.client.SetToken(token)
+	vaultClient.SetToken(token)
 	return nil
 }

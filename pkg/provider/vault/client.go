@@ -39,9 +39,9 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
-var _ esv1.SecretsClient = &client{}
+var _ esv1.SecretsClient = &secretsClient{}
 
-type client struct {
+type secretsClient struct {
 	kube         kclient.Client
 	store        *esv1.VaultProvider
 	log          logr.Logger
@@ -55,18 +55,21 @@ type client struct {
 	configDigest string
 }
 
-func (c *client) newConfig(ctx context.Context) (*vault.Config, error) {
+// buildVaultConfig creates a Vault SDK configuration from authContext.
+// This is a standalone function that doesn't depend on secretsClient,
+// making it usable during initial client creation.
+func buildVaultConfig(ctx context.Context, authCtx *authContext) (*vault.Config, error) {
 	cfg := vault.DefaultConfig()
-	cfg.Address = c.store.Server
+	cfg.Address = authCtx.spec.Server
 
-	if len(c.store.CABundle) != 0 || c.store.CAProvider != nil {
+	if len(authCtx.spec.CABundle) != 0 || authCtx.spec.CAProvider != nil {
 		caCertPool := x509.NewCertPool()
 		ca, err := utils.FetchCACertFromSource(ctx, utils.CreateCertOpts{
-			CABundle:   c.store.CABundle,
-			CAProvider: c.store.CAProvider,
-			StoreKind:  c.storeKind,
-			Namespace:  c.namespace,
-			Client:     c.kube,
+			CABundle:   authCtx.spec.CABundle,
+			CAProvider: authCtx.spec.CAProvider,
+			StoreKind:  authCtx.storeKind,
+			Namespace:  authCtx.namespace,
+			Client:     authCtx.kube,
 		})
 		if err != nil {
 			return nil, err
@@ -81,24 +84,26 @@ func (c *client) newConfig(ctx context.Context) (*vault.Config, error) {
 		}
 	}
 
-	err := c.configureClientTLS(ctx, cfg)
+	err := configureClientTLS(ctx, authCtx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	// If either read-after-write consistency feature is enabled, enable ReadYourWrites
-	cfg.ReadYourWrites = c.store.ReadYourWrites || c.store.ForwardInconsistent
+	cfg.ReadYourWrites = authCtx.spec.ReadYourWrites || authCtx.spec.ForwardInconsistent
 
 	return cfg, nil
 }
 
-func (c *client) configureClientTLS(ctx context.Context, cfg *vault.Config) error {
-	clientTLS := c.store.ClientTLS
+// configureClientTLS configures TLS client certificates on the Vault config.
+// This is a standalone function that accepts authContext for flexibility.
+func configureClientTLS(ctx context.Context, authCtx *authContext, cfg *vault.Config) error {
+	clientTLS := authCtx.spec.ClientTLS
 	if clientTLS.CertSecretRef != nil && clientTLS.KeySecretRef != nil {
 		if clientTLS.KeySecretRef.Key == "" {
 			clientTLS.KeySecretRef.Key = corev1.TLSPrivateKeyKey
 		}
-		clientKey, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, clientTLS.KeySecretRef)
+		clientKey, err := resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, clientTLS.KeySecretRef)
 		if err != nil {
 			return err
 		}
@@ -106,7 +111,7 @@ func (c *client) configureClientTLS(ctx context.Context, cfg *vault.Config) erro
 		if clientTLS.CertSecretRef.Key == "" {
 			clientTLS.CertSecretRef.Key = corev1.TLSCertKey
 		}
-		clientCert, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, clientTLS.CertSecretRef)
+		clientCert, err := resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, clientTLS.CertSecretRef)
 		if err != nil {
 			return err
 		}
@@ -123,7 +128,10 @@ func (c *client) configureClientTLS(ctx context.Context, cfg *vault.Config) erro
 	return nil
 }
 
-func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStore) (string, error) {
+// computeVaultConfigDigest computes a hash digest of the Vault configuration.
+// This is used to detect configuration changes and invalidate cached clients.
+// This is a standalone function that accepts authContext for flexibility.
+func computeVaultConfigDigest(ctx context.Context, authCtx *authContext, store esv1.GenericStore) (string, error) {
 	hasher := sha256.New()
 	writePart := func(parts ...string) {
 		for _, p := range parts {
@@ -136,38 +144,38 @@ func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStor
 		writePart("store-gen", fmt.Sprintf("%d", store.GetGeneration()))
 	}
 
-	if c.store.Namespace != nil {
-		writePart("vault-namespace", *c.store.Namespace)
+	if authCtx.spec.Namespace != nil {
+		writePart("vault-namespace", *authCtx.spec.Namespace)
 	}
 
-	if c.store.ReadYourWrites {
+	if authCtx.spec.ReadYourWrites {
 		writePart("read-your-writes", "true")
 	}
 
-	if c.store.ForwardInconsistent {
+	if authCtx.spec.ForwardInconsistent {
 		writePart("forward-inconsistent", "true")
 	}
 
-	if len(c.store.Headers) > 0 {
-		keys := make([]string, 0, len(c.store.Headers))
-		for k := range c.store.Headers {
+	if len(authCtx.spec.Headers) > 0 {
+		keys := make([]string, 0, len(authCtx.spec.Headers))
+		for k := range authCtx.spec.Headers {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			writePart("header", k, c.store.Headers[k])
+			writePart("header", k, authCtx.spec.Headers[k])
 		}
 	}
 
-	if len(c.store.CABundle) > 0 {
+	if len(authCtx.spec.CABundle) > 0 {
 		writePart("ca-bundle-inline")
-		_, _ = hasher.Write(c.store.CABundle)
+		_, _ = hasher.Write(authCtx.spec.CABundle)
 		_, _ = hasher.Write([]byte{0})
 	}
 
-	if c.store.CAProvider != nil {
-		cp := c.store.CAProvider
-		ns := c.namespace
+	if authCtx.spec.CAProvider != nil {
+		cp := authCtx.spec.CAProvider
+		ns := authCtx.namespace
 		if cp.Namespace != nil {
 			ns = *cp.Namespace
 		}
@@ -180,13 +188,13 @@ func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStor
 		switch cp.Type {
 		case esv1.CAProviderTypeSecret:
 			secret := &corev1.Secret{}
-			if err := c.kube.Get(ctx, key, secret); err != nil {
+			if err := authCtx.kube.Get(ctx, key, secret); err != nil {
 				return "", err
 			}
 			writePart("ca-secret", fmt.Sprintf("%s/%s", key.Namespace, key.Name), fmt.Sprintf("v%s", secret.ResourceVersion))
 		case esv1.CAProviderTypeConfigMap:
 			configMap := &corev1.ConfigMap{}
-			if err := c.kube.Get(ctx, key, configMap); err != nil {
+			if err := authCtx.kube.Get(ctx, key, configMap); err != nil {
 				return "", err
 			}
 			writePart("ca-configmap", fmt.Sprintf("%s/%s", key.Namespace, key.Name), fmt.Sprintf("v%s", configMap.ResourceVersion))
@@ -195,9 +203,9 @@ func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStor
 		}
 	}
 
-	clientTLS := c.store.ClientTLS
+	clientTLS := authCtx.spec.ClientTLS
 	if clientTLS.CertSecretRef != nil {
-		ns := c.namespace
+		ns := authCtx.namespace
 		if clientTLS.CertSecretRef.Namespace != nil {
 			ns = *clientTLS.CertSecretRef.Namespace
 		}
@@ -206,14 +214,14 @@ func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStor
 		}
 
 		secret := &corev1.Secret{}
-		if err := c.kube.Get(ctx, kclient.ObjectKey{Namespace: ns, Name: clientTLS.CertSecretRef.Name}, secret); err != nil {
+		if err := authCtx.kube.Get(ctx, kclient.ObjectKey{Namespace: ns, Name: clientTLS.CertSecretRef.Name}, secret); err != nil {
 			return "", err
 		}
 		writePart("tls-cert", fmt.Sprintf("%s/%s", ns, clientTLS.CertSecretRef.Name), fmt.Sprintf("v%s", secret.ResourceVersion))
 	}
 
 	if clientTLS.KeySecretRef != nil {
-		ns := c.namespace
+		ns := authCtx.namespace
 		if clientTLS.KeySecretRef.Namespace != nil {
 			ns = *clientTLS.KeySecretRef.Namespace
 		}
@@ -222,7 +230,7 @@ func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStor
 		}
 
 		secret := &corev1.Secret{}
-		if err := c.kube.Get(ctx, kclient.ObjectKey{Namespace: ns, Name: clientTLS.KeySecretRef.Name}, secret); err != nil {
+		if err := authCtx.kube.Get(ctx, kclient.ObjectKey{Namespace: ns, Name: clientTLS.KeySecretRef.Name}, secret); err != nil {
 			return "", err
 		}
 		writePart("tls-key", fmt.Sprintf("%s/%s", ns, clientTLS.KeySecretRef.Name), fmt.Sprintf("v%s", secret.ResourceVersion))
@@ -231,9 +239,23 @@ func (c *client) computeConfigDigest(ctx context.Context, store esv1.GenericStor
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func (c *client) Close(ctx context.Context) error {
+// newConfig is a wrapper around buildVaultConfig for backward compatibility.
+// It delegates to the standalone buildVaultConfig function.
+func (sc *secretsClient) newConfig(ctx context.Context) (*vault.Config, error) {
+	authCtx := newAuthContext(sc.store, sc.kube, sc.corev1, sc.namespace, sc.storeKind)
+	return buildVaultConfig(ctx, authCtx)
+}
+
+// computeConfigDigest is a wrapper around computeVaultConfigDigest for backward compatibility.
+// It delegates to the standalone computeVaultConfigDigest function.
+func (sc *secretsClient) computeConfigDigest(ctx context.Context, store esv1.GenericStore) (string, error) {
+	authCtx := newAuthContext(sc.store, sc.kube, sc.corev1, sc.namespace, sc.storeKind)
+	return computeVaultConfigDigest(ctx, authCtx, store)
+}
+
+func (sc *secretsClient) Close(ctx context.Context) error {
 	if enableVaultClientPooling {
-		if _, ok := c.client.(*pooledVaultClient); ok {
+		if _, ok := sc.client.(*pooledVaultClient); ok {
 			// Pooled clients are kept alive across reconciliations; eviction handles revocation.
 			return nil
 		}
@@ -241,8 +263,8 @@ func (c *client) Close(ctx context.Context) error {
 
 	// Revoke the token if we have one set, it wasn't sourced from a TokenSecretRef,
 	// and token caching isn't enabled
-	if !enableCache && c.client.Token() != "" && c.store.Auth != nil && c.store.Auth.TokenSecretRef == nil {
-		err := revokeTokenIfValid(ctx, c.client)
+	if !enableCache && sc.client.Token() != "" && sc.store.Auth != nil && sc.store.Auth.TokenSecretRef == nil {
+		err := revokeTokenIfValid(ctx, sc.client)
 		if err != nil {
 			return err
 		}

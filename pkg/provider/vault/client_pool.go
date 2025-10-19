@@ -81,11 +81,14 @@ var manualPoolRemovals sync.Map
 //
 // This client can be safely reused across multiple ExternalSecrets with identical
 // credentials. It automatically re-authenticates when Vault tokens expire.
+//
+// The client stores an authContext which bundles all state needed for authentication,
+// eliminating circular dependencies with the client/secretsClient struct.
 type pooledVaultClient struct {
-	client          *util.VaultClient
-	cacheKey        string
+	vault           *util.VaultClient
+	authContext     *authContext
 	cfg             *vault.Config
-	setAuth         func(context.Context, *vault.Config) error
+	cacheKey        string
 	mu              sync.Mutex
 	lastAuth        time.Time
 	configDigest    string
@@ -94,18 +97,18 @@ type pooledVaultClient struct {
 
 // Auth returns the Auth interface from the underlying client.
 func (pvc *pooledVaultClient) Auth() util.Auth {
-	return pvc.client.Auth()
+	return pvc.vault.Auth()
 }
 
 // AuthToken returns the Token interface from the underlying client.
 func (pvc *pooledVaultClient) AuthToken() util.Token {
-	return pvc.client.AuthToken()
+	return pvc.vault.AuthToken()
 }
 
 // Logical returns a wrapped Logical interface with automatic retry on token expiration.
 func (pvc *pooledVaultClient) Logical() util.Logical {
 	return &logicalWithRetry{
-		Logical:      pvc.client.Logical(),
+		Logical:      pvc.vault.Logical(),
 		pooledClient: pvc,
 		cacheKey:     pvc.cacheKey,
 		shouldRetry:  pvc.shouldRetryWithReauth,
@@ -114,42 +117,48 @@ func (pvc *pooledVaultClient) Logical() util.Logical {
 
 // SetToken sets the token on the underlying client.
 func (pvc *pooledVaultClient) SetToken(token string) {
-	pvc.client.SetToken(token)
+	pvc.vault.SetToken(token)
 }
 
 // Token returns the current token.
 func (pvc *pooledVaultClient) Token() string {
-	return pvc.client.Token()
+	return pvc.vault.Token()
 }
 
 // ClearToken clears the token on the underlying client.
 func (pvc *pooledVaultClient) ClearToken() {
-	pvc.client.ClearToken()
+	pvc.vault.ClearToken()
 }
 
 // SetNamespace sets the namespace on the underlying client.
 func (pvc *pooledVaultClient) SetNamespace(namespace string) {
-	pvc.client.SetNamespace(namespace)
+	pvc.vault.SetNamespace(namespace)
 }
 
 // Namespace returns the current namespace.
 func (pvc *pooledVaultClient) Namespace() string {
-	return pvc.client.Namespace()
+	return pvc.vault.Namespace()
 }
 
 // AddHeader adds a header to the underlying client.
 func (pvc *pooledVaultClient) AddHeader(key, value string) {
-	pvc.client.AddHeader(key, value)
+	pvc.vault.AddHeader(key, value)
 }
 
 // reAuthenticate re-authenticates the client with current credentials from Kubernetes.
 // This is called automatically when token expiration is detected.
+//
+// The function:
+// 1. Calls the standalone authenticateVault function with stored authContext
+// 2. Fetches fresh credentials from Kubernetes (via authContext.kube)
+// 3. Removes client from pool on failure
+// 4. Updates lastAuth timestamp on success
 func (pvc *pooledVaultClient) reAuthenticate(ctx context.Context) error {
 	pvc.mu.Lock()
 	defer pvc.mu.Unlock()
 
-	// Call the auth function (fetches current credentials from K8s and authenticates)
-	if err := pvc.setAuth(ctx, pvc.cfg); err != nil {
+	// Call standalone auth function - no dependency on client struct!
+	if err := authenticateVault(ctx, pvc.vault, pvc.authContext, pvc.cfg); err != nil {
 		// Remove from pool on auth failure
 		removePooledClient(pvc.cacheKey)
 		return err
@@ -183,7 +192,7 @@ func (pvc *pooledVaultClient) shouldRetryWithReauth(ctx context.Context, err err
 	// Ambiguous "permission denied" - need to check if it's token expiration or policy denial
 	if strings.Contains(errStr, "permission denied") {
 		// Try to look up the token to see if it's still valid
-		_, lookupErr := pvc.client.AuthToken().LookupSelfWithContext(ctx)
+		_, lookupErr := pvc.vault.AuthToken().LookupSelfWithContext(ctx)
 
 		// If lookup fails, token is invalid - should retry
 		// If lookup succeeds, token is valid but insufficient permissions - should NOT retry (policy denial)

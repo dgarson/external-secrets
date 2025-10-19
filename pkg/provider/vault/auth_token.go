@@ -19,17 +19,28 @@ package vault
 import (
 	"context"
 
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
-func setSecretKeyToken(ctx context.Context, v *client) (bool, error) {
-	tokenRef := v.store.Auth.TokenSecretRef
+func setSecretKeyToken(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+) (bool, error) {
+	tokenRef := authCtx.spec.Auth.TokenSecretRef
 	if tokenRef != nil {
-		token, err := resolvers.SecretKeyRef(ctx, v.kube, v.storeKind, v.namespace, tokenRef)
+		token, err := resolvers.SecretKeyRef(
+			ctx,
+			authCtx.kube,
+			authCtx.storeKind,
+			authCtx.namespace,
+			tokenRef,
+		)
 		if err != nil {
 			return true, err
 		}
-		v.client.SetToken(token)
+		vaultClient.SetToken(token)
 		return true, nil
 	}
 	return false, nil

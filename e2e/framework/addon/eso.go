@@ -83,6 +83,10 @@ func NewESO(mutators ...MutationFunc) *ESO {
 				},
 				{
 					Key:   "extraArgs.experimental-enable-vault-token-cache",
+					Value: "false",
+				},
+				{
+					Key:   "extraArgs.enable-vault-client-pooling",
 					Value: "true",
 				},
 			},

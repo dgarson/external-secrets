@@ -176,14 +176,14 @@ func (p *Provider) ValidateStore(store esv1.GenericStore) (admission.Warnings, e
 	return nil, nil
 }
 
-func (c *client) Validate() (esv1.ValidationResult, error) {
+func (sc *secretsClient) Validate() (esv1.ValidationResult, error) {
 	// when using referent namespace we can not validate the token
 	// because the namespace is not known yet when Validate() is called
 	// from the SecretStore controller.
-	if c.storeKind == esv1.ClusterSecretStoreKind && isReferentSpec(c.store) {
+	if sc.storeKind == esv1.ClusterSecretStoreKind && isReferentSpec(sc.store) {
 		return esv1.ValidationResultUnknown, nil
 	}
-	_, err := checkToken(context.Background(), c.token)
+	_, err := checkToken(context.Background(), sc.token)
 	if err != nil {
 		return esv1.ValidationResultError, fmt.Errorf(errInvalidCredentials, err)
 	}

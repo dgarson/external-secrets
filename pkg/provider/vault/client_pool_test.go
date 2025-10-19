@@ -673,13 +673,21 @@ func TestClientCloseSkipsRevokeForPooledClient(t *testing.T) {
 		},
 	}
 
+	authCtx := &authContext{
+		spec:      &esv1.VaultProvider{},
+		kube:      fake.NewClientBuilder().Build(),
+		corev1:    nil,
+		namespace: "default",
+		storeKind: esv1.SecretStoreKind,
+	}
 	pooled := &pooledVaultClient{
-		client:   vaultClient,
-		cacheKey: "pooled-key",
-		setAuth:  func(context.Context, *vault.Config) error { return nil },
+		vault:       vaultClient,
+		authContext: authCtx,
+		cfg:         &vault.Config{},
+		cacheKey:    "pooled-key",
 	}
 
-	c := &client{
+	c := &secretsClient{
 		client: pooled,
 		store: &esv1.VaultProvider{
 			Auth: &esv1.VaultAuth{},
@@ -698,9 +706,9 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-func newDigestClient(t *testing.T, kube ctrlclient.Client, spec *esv1.VaultProvider) *client {
+func newDigestClient(t *testing.T, kube ctrlclient.Client, spec *esv1.VaultProvider) *secretsClient {
 	t.Helper()
-	return &client{
+	return &secretsClient{
 		kube:      kube,
 		store:     spec,
 		log:       logger,

@@ -345,7 +345,7 @@ MIIFkTCCA3mgAwIBAgIUBEUg3m/WqAsWHG4Q/II3IePFfuowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UE
 				}),
 			},
 			want: want{
-				err: errors.New(errAuthFormat),
+				err: fmt.Errorf(errVaultClient, errors.New(errAuthFormat)),
 			},
 		},
 		"GetKubeServiceAccountError": {
@@ -358,7 +358,7 @@ MIIFkTCCA3mgAwIBAgIUBEUg3m/WqAsWHG4Q/II3IePFfuowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UE
 				corev1:        utilfake.NewCreateTokenMock().WithError(errBoom),
 			},
 			want: want{
-				err: fmt.Errorf(errGetKubeSATokenRequest, "example-sa", fmt.Errorf(errGetKubeSA, "example-sa", fmt.Errorf(errServiceAccountNotFound, "example-sa"))),
+				err: fmt.Errorf(errVaultClient, fmt.Errorf(errGetKubeSATokenRequest, "example-sa", fmt.Errorf(errGetKubeSA, "example-sa", fmt.Errorf(errServiceAccountNotFound, "example-sa")))),
 			},
 		},
 		"GetKubeSecretError": {
@@ -375,7 +375,7 @@ MIIFkTCCA3mgAwIBAgIUBEUg3m/WqAsWHG4Q/II3IePFfuowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UE
 				kube: clientfake.NewClientBuilder().Build(),
 			},
 			want: want{
-				err: fmt.Errorf(`cannot get Kubernetes secret "vault-secret" from namespace "default": %w`, errors.New(`secrets "vault-secret" not found`)),
+				err: fmt.Errorf(errVaultClient, fmt.Errorf(`cannot get Kubernetes secret "vault-secret" from namespace "default": %w`, errors.New(`secrets "vault-secret" not found`))),
 			},
 		},
 		"SuccessfulVaultStoreWithCertAuth": {
@@ -540,7 +540,7 @@ MIIFkTCCA3mgAwIBAgIUBEUg3m/WqAsWHG4Q/II3IePFfuowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UE
 				newClientFunc: fake.ClientWithLoginMock,
 			},
 			want: want{
-				err: fmt.Errorf(errClientTLSAuth, "tls: failed to find any PEM data in certificate input"),
+				err: fmt.Errorf(errVaultClient, fmt.Errorf(errClientTLSAuth, "tls: failed to find any PEM data in certificate input")),
 			},
 		},
 		"GetKeyFormatError": {
@@ -561,7 +561,7 @@ MIIFkTCCA3mgAwIBAgIUBEUg3m/WqAsWHG4Q/II3IePFfuowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UE
 				newClientFunc: fake.ClientWithLoginMock,
 			},
 			want: want{
-				err: fmt.Errorf(errClientTLSAuth, "tls: failed to find any PEM data in key input"),
+				err: fmt.Errorf(errVaultClient, fmt.Errorf(errClientTLSAuth, "tls: failed to find any PEM data in key input")),
 			},
 		},
 		"ClientTlsInvalidCertificatesError": {
@@ -724,7 +724,7 @@ MIIFkTCCA3mgAwIBAgIUBEUg3m/WqAsWHG4Q/II3IePFfuowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UE
 				newClientFunc: fake.ClientWithLoginMock,
 			},
 			want: want{
-				err: errors.New(errNoAWSAuthMethodFound),
+				err: fmt.Errorf(errVaultClient, errors.New(errNoAWSAuthMethodFound)),
 			},
 		},
 	}
@@ -750,7 +750,6 @@ func vaultTest(t *testing.T, _ string, tc testCase) {
 }
 
 func TestGetControllerPodCredentials(t *testing.T) {
-	client := &client{storeKind: esv1.SecretStoreKind}
 	ctx := context.Background()
 	region := "us-east-1"
 	kube := clientfake.NewClientBuilder().Build()
@@ -758,7 +757,7 @@ func TestGetControllerPodCredentials(t *testing.T) {
 	t.Run("PodIdentityEnvVars", func(t *testing.T) {
 		t.Setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.23/v1/credentials")
 
-		creds, err := client.getControllerPodCredentials(ctx, region, kube, nil)
+		creds, err := getControllerPodCredentials(ctx, region, kube, nil)
 
 		// Should succeed and return nil (indicating AWS SDK should handle it)
 		if err != nil {
@@ -771,7 +770,7 @@ func TestGetControllerPodCredentials(t *testing.T) {
 
 	t.Run("NoEnvVars", func(t *testing.T) {
 		// Pod Identity URI is not set.
-		_, err := client.getControllerPodCredentials(ctx, region, kube, nil)
+		_, err := getControllerPodCredentials(ctx, region, kube, nil)
 
 		expectedErr := fmt.Errorf(errNoAWSAuthMethodFound)
 		if diff := cmp.Diff(expectedErr, err, EquateErrors()); diff != "" {
@@ -808,45 +807,49 @@ func TestCache(t *testing.T) {
 			Namespace: namespace,
 		},
 	}).Build()
+	corev1Client := utilfake.NewCreateTokenMock().WithToken("ok")
 
 	ctx := context.Background()
 	vaultSpec := store.GetSpec().Provider.Vault
 
 	// First request creates a new client
-	client1, cfg1, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, namespace, store.GetObjectKind().GroupVersionKind().Kind)
+	authCtx1 := newAuthContext(vaultSpec, kube, corev1Client, namespace, store.GetObjectKind().GroupVersionKind().Kind)
+	cfg1, err := buildVaultConfigFromContext(ctx, authCtx1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = acquireVaultClient(ctx, prov, client1, cfg1, store)
+	vaultClient1, err := prov.acquireVaultClient(ctx, authCtx1, cfg1, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Second request should retrieve cached client instance
-	client2, cfg2, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, namespace, store.GetObjectKind().GroupVersionKind().Kind)
+	authCtx2 := newAuthContext(vaultSpec, kube, corev1Client, namespace, store.GetObjectKind().GroupVersionKind().Kind)
+	cfg2, err := buildVaultConfigFromContext(ctx, authCtx2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = acquireVaultClient(ctx, prov, client2, cfg2, store)
+	vaultClient2, err := prov.acquireVaultClient(ctx, authCtx2, cfg2, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if client1.client != client2.client {
+	if vaultClient1 != vaultClient2 {
 		t.Fatal("Expected a cached client instance")
 	}
 
 	// Third request should retrieve cached client instance even when using a different namespace,
 	// because the ClusterSecretStore references a ServiceAccount of a specific namespace
-	client3, cfg3, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "another-namespace", store.GetObjectKind().GroupVersionKind().Kind)
+	authCtx3 := newAuthContext(vaultSpec, kube, corev1Client, "another-namespace", store.GetObjectKind().GroupVersionKind().Kind)
+	cfg3, err := buildVaultConfigFromContext(ctx, authCtx3, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = acquireVaultClient(ctx, prov, client3, cfg3, store)
+	vaultClient3, err := prov.acquireVaultClient(ctx, authCtx3, cfg3, store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client3.client != client1.client {
+	if vaultClient3 != vaultClient1 {
 		t.Fatal("Expected a cached client instance")
 	}
 }
@@ -885,45 +888,49 @@ func TestCacheWithReferentSpec(t *testing.T) {
 			},
 		},
 	).Build()
+	corev1Client := utilfake.NewCreateTokenMock().WithToken("ok")
 
 	ctx := context.Background()
 	vaultSpec := store.GetSpec().Provider.Vault
 
 	// First request creates a new client
-	client1, cfg1, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "default", store.GetObjectKind().GroupVersionKind().Kind)
+	authCtx1 := newAuthContext(vaultSpec, kube, corev1Client, "default", store.GetObjectKind().GroupVersionKind().Kind)
+	cfg1, err := buildVaultConfigFromContext(ctx, authCtx1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = acquireVaultClient(ctx, prov, client1, cfg1, store)
+	vaultClient1, err := prov.acquireVaultClient(ctx, authCtx1, cfg1, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Second request should retrieve cached client instance
-	client2, cfg2, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "default", store.GetObjectKind().GroupVersionKind().Kind)
+	authCtx2 := newAuthContext(vaultSpec, kube, corev1Client, "default", store.GetObjectKind().GroupVersionKind().Kind)
+	cfg2, err := buildVaultConfigFromContext(ctx, authCtx2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = acquireVaultClient(ctx, prov, client2, cfg2, store)
+	vaultClient2, err := prov.acquireVaultClient(ctx, authCtx2, cfg2, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if client1.client != client2.client {
+	if vaultClient1 != vaultClient2 {
 		t.Fatal("Expected a cached client instance")
 	}
 
 	// Third request should retrieve a new client instance,
 	// because the ServiceAccount namespace depends on the namespace of the referent
-	client3, cfg3, err := prov.prepareConfig(ctx, kube, nil, vaultSpec, nil, "another-namespace", store.GetObjectKind().GroupVersionKind().Kind)
+	authCtx3 := newAuthContext(vaultSpec, kube, corev1Client, "another-namespace", store.GetObjectKind().GroupVersionKind().Kind)
+	cfg3, err := buildVaultConfigFromContext(ctx, authCtx3, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = acquireVaultClient(ctx, prov, client3, cfg3, store)
+	vaultClient3, err := prov.acquireVaultClient(ctx, authCtx3, cfg3, store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client3.client == client1.client {
+	if vaultClient3 == vaultClient1 {
 		t.Fatal("Expected a new client instance")
 	}
 }

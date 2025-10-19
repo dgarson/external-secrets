@@ -42,79 +42,117 @@ const (
 	errVaultRevokeToken      = "error while revoking token: %w"
 )
 
-// setAuth gets a new token using the configured mechanism.
-// If there's already a valid token, does nothing.
-func (c *client) setAuth(ctx context.Context, cfg *vault.Config) error {
-	if c.store.Auth == nil {
+// authenticateVault performs Vault authentication using the provided context.
+// This is a standalone function (not a method) to eliminate circular dependencies
+// between client and pooledVaultClient. It can be called by both pooledVaultClient.reAuthenticate()
+// and during initial client setup.
+//
+// The function:
+// 1. Checks for an existing valid token (reuses if possible)
+// 2. Tries each configured auth method in order
+// 3. Returns error if no auth method succeeds
+//
+// Authentication reads fresh credentials from Kubernetes on every call,
+// ensuring rotated credentials are automatically picked up.
+func authenticateVault(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	cfg *vault.Config,
+) error {
+	if authCtx.spec.Auth == nil {
 		return nil
 	}
 
-	if c.store.Namespace != nil { // set namespace before checking the need for AuthNamespace
-		c.client.SetNamespace(*c.store.Namespace)
+	if authCtx.spec.Namespace != nil {
+		vaultClient.SetNamespace(*authCtx.spec.Namespace)
 	}
 
-	// Switch to auth namespace if different from the provider namespace
-	restoreNamespace := c.useAuthNamespace(ctx)
+	// Switch to auth namespace if different from provider namespace
+	restoreNamespace := useAuthNamespace(vaultClient, authCtx.spec)
 	defer restoreNamespace()
 
+	// Check if existing token is still valid
 	tokenExists := false
 	var err error
-	if c.client.Token() != "" {
-		tokenExists, err = checkToken(ctx, c.token)
+	if vaultClient.Token() != "" {
+		tokenExists, err = checkToken(ctx, vaultClient.AuthToken())
 	}
 	if tokenExists {
-		c.log.V(1).Info("Re-using existing token")
+		logger.V(1).Info("Re-using existing token")
 		return err
 	}
 
-	tokenExists, err = setSecretKeyToken(ctx, c)
+	tokenExists, err = setSecretKeyToken(ctx, vaultClient, authCtx)
 	if tokenExists {
-		c.log.V(1).Info("Set token from secret")
+		logger.V(1).Info("Set token from secret")
 		return err
 	}
 
-	tokenExists, err = setAppRoleToken(ctx, c)
+	tokenExists, err = setAppRoleToken(ctx, vaultClient, authCtx)
 	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using AppRole auth")
+		logger.V(1).Info("Retrieved new token using AppRole auth")
 		return err
 	}
 
-	tokenExists, err = setKubernetesAuthToken(ctx, c)
+	tokenExists, err = setKubernetesAuthToken(ctx, vaultClient, authCtx)
 	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using Kubernetes auth")
+		logger.V(1).Info("Retrieved new token using Kubernetes auth")
 		return err
 	}
 
-	tokenExists, err = setLdapAuthToken(ctx, c)
+	tokenExists, err = setLdapAuthToken(ctx, vaultClient, authCtx)
 	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using LDAP auth")
+		logger.V(1).Info("Retrieved new token using LDAP auth")
 		return err
 	}
 
-	tokenExists, err = setUserPassAuthToken(ctx, c)
+	tokenExists, err = setUserPassAuthToken(ctx, vaultClient, authCtx)
 	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using userPass auth")
-		return err
-	}
-	tokenExists, err = setJwtAuthToken(ctx, c)
-	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using JWT auth")
+		logger.V(1).Info("Retrieved new token using userPass auth")
 		return err
 	}
 
-	tokenExists, err = setCertAuthToken(ctx, c, cfg)
+	tokenExists, err = setJwtAuthToken(ctx, vaultClient, authCtx)
 	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using certificate auth")
+		logger.V(1).Info("Retrieved new token using JWT auth")
 		return err
 	}
 
-	tokenExists, err = setIamAuthToken(ctx, c, vaultiamauth.DefaultJWTProvider, vaultiamauth.DefaultSTSProvider)
+	tokenExists, err = setCertAuthToken(ctx, vaultClient, authCtx, cfg)
 	if tokenExists {
-		c.log.V(1).Info("Retrieved new token using IAM auth")
+		logger.V(1).Info("Retrieved new token using certificate auth")
+		return err
+	}
+
+	tokenExists, err = setIamAuthToken(ctx, vaultClient, authCtx, vaultiamauth.DefaultJWTProvider, vaultiamauth.DefaultSTSProvider)
+	if tokenExists {
+		logger.V(1).Info("Retrieved new token using IAM auth")
 		return err
 	}
 
 	return errors.New(errAuthFormat)
+}
+
+// useAuthNamespace switches to auth namespace if configured, returns restore function.
+func useAuthNamespace(vaultClient util.Client, spec *esv1.VaultProvider) func() {
+	ns := ""
+	if spec.Namespace != nil {
+		ns = *spec.Namespace
+	}
+
+	if spec.Auth != nil && spec.Auth.Namespace != nil {
+		if *spec.Auth.Namespace != ns {
+			logger.V(1).Info("Using namespace for vault login", "namespace", *spec.Auth.Namespace)
+			vaultClient.SetNamespace(*spec.Auth.Namespace)
+			return func() {
+				logger.V(1).Info("Restoring client namespace", "namespace", ns)
+				vaultClient.SetNamespace(ns)
+			}
+		}
+	}
+
+	return func() {} // no-op
 }
 
 func createServiceAccountToken(
@@ -210,29 +248,4 @@ func revokeTokenIfValid(ctx context.Context, client util.Client) error {
 		client.ClearToken()
 	}
 	return nil
-}
-
-func (c *client) useAuthNamespace(_ context.Context) func() {
-	ns := ""
-	if c.store != nil && c.store.Namespace != nil {
-		ns = *c.store.Namespace
-	}
-
-	if c.store.Auth != nil && c.store.Auth.Namespace != nil {
-		// Different Auth Vault Namespace than Secret Vault Namespace
-		// Switch namespaces then switch back at the end
-		if c.store.Auth.Namespace != nil && *c.store.Auth.Namespace != ns {
-			c.log.V(1).Info("Using namespace=%s for the vault login", *c.store.Auth.Namespace)
-			c.client.SetNamespace(*c.store.Auth.Namespace)
-			// use this as a defer to reset the namespace
-			return func() {
-				c.log.V(1).Info("Restoring client namespace to namespace=%s", ns)
-				c.client.SetNamespace(ns)
-			}
-		}
-	}
-
-	return func() {
-		// no-op
-	}
 }

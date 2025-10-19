@@ -327,7 +327,7 @@ func TestDeleteSecret(t *testing.T) {
 			if tc.ref != nil {
 				ref = *tc.ref
 			}
-			client := &client{
+			client := &secretsClient{
 				logical: tc.args.vLogical,
 				store:   tc.args.store,
 			}
@@ -792,7 +792,7 @@ func TestPushSecret(t *testing.T) {
 			if tc.data != nil {
 				data = *tc.data
 			}
-			client := &client{
+			client := &secretsClient{
 				logical: tc.args.vLogical,
 				store:   tc.args.store,
 			}

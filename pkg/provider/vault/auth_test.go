@@ -134,37 +134,30 @@ func TestSetAuthNamespace(t *testing.T) {
 				NewVaultClient: fake.ClientWithLoginMock,
 			}
 
-			c, cfg, err := prov.prepareConfig(context.Background(), kube, nil, tc.args.store.Spec.Provider.Vault, nil, "default", store.GetObjectKind().GroupVersionKind().Kind)
+			authCtx := newAuthContext(tc.args.store.Spec.Provider.Vault, kube, nil, "default", store.GetObjectKind().GroupVersionKind().Kind)
+			cfg, err := buildVaultConfigFromContext(context.Background(), authCtx, nil)
 			if err != nil {
 				t.Error(err.Error())
 			}
 
-			// Use unified kernel method to acquire client
-			initialized, err := acquireVaultClient(context.Background(), prov, c, cfg, tc.args.store)
+			// Use simplified acquisition (always returns fully initialized client)
+			vaultClient, err := prov.acquireVaultClient(context.Background(), authCtx, cfg, tc.args.store)
 			if err != nil {
 				t.Errorf("vault.useAuthNamespace: failed to acquire client: %s", err.Error())
 			}
 
-			// If not initialized (pool miss or non-pooled), initialize the client
-			if !initialized {
-				_, err = prov.initClient(context.Background(), c, c.client, cfg, tc.args.store.Spec.Provider.Vault)
-				if err != nil {
-					t.Errorf("vault.useAuthNamespace: failed to init client: %s", err.Error())
-				}
-			}
-
 			// before auth
 			actual := result{
-				Before: c.client.Namespace(),
+				Before: vaultClient.Namespace(),
 			}
 
 			// during authentication (getting a token)
-			resetNS := c.useAuthNamespace(context.Background())
-			actual.During = c.client.Namespace()
+			resetNS := useAuthNamespace(vaultClient, tc.args.store.Spec.Provider.Vault)
+			actual.During = vaultClient.Namespace()
 			resetNS()
 
 			// after getting the token
-			actual.After = c.client.Namespace()
+			actual.After = vaultClient.Namespace()
 
 			if diff := cmp.Diff(tc.args.expected, actual, cmpopts.EquateComparable()); diff != "" {
 				t.Errorf("\n%s\nvault.useAuthNamepsace(...): -want namespace, +got namespace:\n%s", tc.reason, diff)

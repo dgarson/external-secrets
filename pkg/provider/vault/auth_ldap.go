@@ -25,13 +25,18 @@ import (
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	"github.com/external-secrets/external-secrets/pkg/constants"
 	"github.com/external-secrets/external-secrets/pkg/metrics"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
-func setLdapAuthToken(ctx context.Context, v *client) (bool, error) {
-	ldapAuth := v.store.Auth.Ldap
+func setLdapAuthToken(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+) (bool, error) {
+	ldapAuth := authCtx.spec.Auth.Ldap
 	if ldapAuth != nil {
-		err := v.requestTokenWithLdapAuth(ctx, ldapAuth)
+		err := requestTokenWithLdapAuth(ctx, vaultClient, authCtx, ldapAuth)
 		if err != nil {
 			return true, err
 		}
@@ -40,9 +45,14 @@ func setLdapAuthToken(ctx context.Context, v *client) (bool, error) {
 	return false, nil
 }
 
-func (c *client) requestTokenWithLdapAuth(ctx context.Context, ldapAuth *esv1.VaultLdapAuth) error {
+func requestTokenWithLdapAuth(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	ldapAuth *esv1.VaultLdapAuth,
+) error {
 	username := strings.TrimSpace(ldapAuth.Username)
-	password, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &ldapAuth.SecretRef)
+	password, err := resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, &ldapAuth.SecretRef)
 	if err != nil {
 		return err
 	}
@@ -51,7 +61,7 @@ func (c *client) requestTokenWithLdapAuth(ctx context.Context, ldapAuth *esv1.Va
 	if err != nil {
 		return err
 	}
-	_, err = c.auth.Login(ctx, l)
+	_, err = vaultClient.Auth().Login(ctx, l)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
 		return err

@@ -25,13 +25,18 @@ import (
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	"github.com/external-secrets/external-secrets/pkg/constants"
 	"github.com/external-secrets/external-secrets/pkg/metrics"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
-func setUserPassAuthToken(ctx context.Context, v *client) (bool, error) {
-	userPassAuth := v.store.Auth.UserPass
+func setUserPassAuthToken(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+) (bool, error) {
+	userPassAuth := authCtx.spec.Auth.UserPass
 	if userPassAuth != nil {
-		err := v.requestTokenWithUserPassAuth(ctx, userPassAuth)
+		err := requestTokenWithUserPassAuth(ctx, vaultClient, authCtx, userPassAuth)
 		if err != nil {
 			return true, err
 		}
@@ -40,9 +45,14 @@ func setUserPassAuthToken(ctx context.Context, v *client) (bool, error) {
 	return false, nil
 }
 
-func (c *client) requestTokenWithUserPassAuth(ctx context.Context, userPassAuth *esv1.VaultUserPassAuth) error {
+func requestTokenWithUserPassAuth(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	userPassAuth *esv1.VaultUserPassAuth,
+) error {
 	username := strings.TrimSpace(userPassAuth.Username)
-	password, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &userPassAuth.SecretRef)
+	password, err := resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, &userPassAuth.SecretRef)
 	if err != nil {
 		return err
 	}
@@ -51,7 +61,7 @@ func (c *client) requestTokenWithUserPassAuth(ctx context.Context, userPassAuth 
 	if err != nil {
 		return err
 	}
-	_, err = c.auth.Login(ctx, l)
+	_, err = vaultClient.Auth().Login(ctx, l)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
 		return err

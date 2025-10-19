@@ -28,6 +28,7 @@ import (
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	"github.com/external-secrets/external-secrets/pkg/constants"
 	"github.com/external-secrets/external-secrets/pkg/metrics"
+	"github.com/external-secrets/external-secrets/pkg/provider/vault/util"
 	"github.com/external-secrets/external-secrets/pkg/utils/resolvers"
 )
 
@@ -35,10 +36,15 @@ const (
 	errVaultRequest = "error from Vault request: %w"
 )
 
-func setCertAuthToken(ctx context.Context, v *client, cfg *vault.Config) (bool, error) {
-	certAuth := v.store.Auth.Cert
+func setCertAuthToken(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	cfg *vault.Config,
+) (bool, error) {
+	certAuth := authCtx.spec.Auth.Cert
 	if certAuth != nil {
-		err := v.requestTokenWithCertAuth(ctx, certAuth, cfg)
+		err := requestTokenWithCertAuth(ctx, vaultClient, authCtx, certAuth, cfg)
 		if err != nil {
 			return true, err
 		}
@@ -47,13 +53,19 @@ func setCertAuthToken(ctx context.Context, v *client, cfg *vault.Config) (bool, 
 	return false, nil
 }
 
-func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.VaultCertAuth, cfg *vault.Config) error {
-	clientKey, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &certAuth.SecretRef)
+func requestTokenWithCertAuth(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	certAuth *esv1.VaultCertAuth,
+	cfg *vault.Config,
+) error {
+	clientKey, err := resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, &certAuth.SecretRef)
 	if err != nil {
 		return err
 	}
 
-	clientCert, err := resolvers.SecretKeyRef(ctx, c.kube, c.storeKind, c.namespace, &certAuth.ClientCert)
+	clientCert, err := resolvers.SecretKeyRef(ctx, authCtx.kube, authCtx.storeKind, authCtx.namespace, &certAuth.ClientCert)
 	if err != nil {
 		return err
 	}
@@ -68,7 +80,7 @@ func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.Va
 	}
 
 	url := strings.Join([]string{"auth", "cert", "login"}, "/")
-	vaultResult, err := c.logical.WriteWithContext(ctx, url, nil)
+	vaultResult, err := vaultClient.Logical().WriteWithContext(ctx, url, nil)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultWriteSecretData, err)
 	if err != nil {
 		return fmt.Errorf(errVaultRequest, err)
@@ -77,6 +89,6 @@ func (c *client) requestTokenWithCertAuth(ctx context.Context, certAuth *esv1.Va
 	if err != nil {
 		return fmt.Errorf(errVaultToken, err)
 	}
-	c.client.SetToken(token)
+	vaultClient.SetToken(token)
 	return nil
 }

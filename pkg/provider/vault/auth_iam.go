@@ -47,11 +47,17 @@ const (
 	errIrsaTokenNotValidClaims    = "could not find pod identity info on token %s"
 )
 
-func setIamAuthToken(ctx context.Context, v *client, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) (bool, error) {
-	iamAuth := v.store.Auth.Iam
-	isClusterKind := v.storeKind == esv1.ClusterSecretStoreKind
+func setIamAuthToken(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	jwtProvider util.JwtProviderFactory,
+	assumeRoler vaultiamauth.STSProvider,
+) (bool, error) {
+	iamAuth := authCtx.spec.Auth.Iam
+	isClusterKind := authCtx.storeKind == esv1.ClusterSecretStoreKind
 	if iamAuth != nil {
-		err := v.requestTokenWithIamAuth(ctx, iamAuth, isClusterKind, v.kube, v.namespace, jwtProvider, assumeRoler)
+		err := requestTokenWithIamAuth(ctx, vaultClient, authCtx, iamAuth, isClusterKind, jwtProvider, assumeRoler)
 		if err != nil {
 			return true, err
 		}
@@ -60,22 +66,30 @@ func setIamAuthToken(ctx context.Context, v *client, jwtProvider util.JwtProvide
 	return false, nil
 }
 
-func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.VaultIamAuth, isClusterKind bool, k kclient.Client, n string, jwtProvider util.JwtProviderFactory, assumeRoler vaultiamauth.STSProvider) error {
+func requestTokenWithIamAuth(
+	ctx context.Context,
+	vaultClient util.Client,
+	authCtx *authContext,
+	iamAuth *esv1.VaultIamAuth,
+	isClusterKind bool,
+	jwtProvider util.JwtProviderFactory,
+	assumeRoler vaultiamauth.STSProvider,
+) error {
 	jwtAuth := iamAuth.JWTAuth
 	secretRefAuth := iamAuth.SecretRef
-	regionAWS := c.getRegionOrDefault(iamAuth.Region)
-	awsAuthMountPath := c.getAuthMountPathOrDefault(iamAuth.Path)
+	regionAWS := getRegionOrDefault(iamAuth.Region)
+	awsAuthMountPath := getAuthMountPathOrDefault(iamAuth.Path)
 
 	var creds *credentials.Credentials
 	var err error
 	if jwtAuth != nil { // use credentials from a sa explicitly defined and referenced. Highest preference is given to this method/configuration.
-		creds, err = vaultiamauth.CredsFromServiceAccount(ctx, *iamAuth, regionAWS, isClusterKind, k, n, jwtProvider)
+		creds, err = vaultiamauth.CredsFromServiceAccount(ctx, *iamAuth, regionAWS, isClusterKind, authCtx.kube, authCtx.namespace, jwtProvider)
 		if err != nil {
 			return err
 		}
 	} else if secretRefAuth != nil { // if jwtAuth is not defined, check if secretRef is defined. Second preference.
 		logger.V(1).Info("using credentials from secretRef")
-		creds, err = vaultiamauth.CredsFromSecretRef(ctx, *iamAuth, c.storeKind, k, n)
+		creds, err = vaultiamauth.CredsFromSecretRef(ctx, *iamAuth, authCtx.storeKind, authCtx.kube, authCtx.namespace)
 		if err != nil {
 			return err
 		}
@@ -84,7 +98,7 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	// Neither of jwtAuth or secretRefAuth defined. Last preference.
 	// Default to controller pod's identity
 	if jwtAuth == nil && secretRefAuth == nil {
-		creds, err = c.getControllerPodCredentials(ctx, regionAWS, k, jwtProvider)
+		creds, err = getControllerPodCredentials(ctx, regionAWS, authCtx.kube, jwtProvider)
 		if err != nil {
 			return err
 		}
@@ -138,7 +152,7 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 		}
 	}
 
-	_, err = c.auth.Login(ctx, awsAuthClient)
+	_, err = vaultClient.Auth().Login(ctx, awsAuthClient)
 	metrics.ObserveAPICall(constants.ProviderHCVault, constants.CallHCVaultLogin, err)
 	if err != nil {
 		return err
@@ -146,26 +160,31 @@ func (c *client) requestTokenWithIamAuth(ctx context.Context, iamAuth *esv1.Vaul
 	return nil
 }
 
-func (c *client) getRegionOrDefault(region string) string {
+func getRegionOrDefault(region string) string {
 	if region != "" {
 		return region
 	}
 	return defaultAWSRegion
 }
 
-func (c *client) getAuthMountPathOrDefault(path string) string {
+func getAuthMountPathOrDefault(path string) string {
 	if path != "" {
 		return path
 	}
 	return defaultAWSAuthMountPath
 }
 
-func (c *client) getControllerPodCredentials(ctx context.Context, region string, k kclient.Client, jwtProvider util.JwtProviderFactory) (*credentials.Credentials, error) {
+func getControllerPodCredentials(
+	ctx context.Context,
+	region string,
+	k kclient.Client,
+	jwtProvider util.JwtProviderFactory,
+) (*credentials.Credentials, error) {
 	// First try IRSA (Web Identity Token) - checking if controller pod's service account is IRSA enabled
 	tokenFile := os.Getenv(vaultiamauth.AWSWebIdentityTokenFileEnvVar)
 	if tokenFile != "" {
 		logger.V(1).Info("using IRSA token for authentication")
-		return c.getCredsFromIRSAToken(ctx, tokenFile, region, k, jwtProvider)
+		return getCredsFromIRSAToken(ctx, tokenFile, region, k, jwtProvider)
 	}
 
 	// Check for Pod Identity environment variables.
@@ -181,7 +200,13 @@ func (c *client) getControllerPodCredentials(ctx context.Context, region string,
 	return nil, errors.New(errNoAWSAuthMethodFound)
 }
 
-func (c *client) getCredsFromIRSAToken(ctx context.Context, tokenFile, region string, k kclient.Client, jwtProvider util.JwtProviderFactory) (*credentials.Credentials, error) {
+func getCredsFromIRSAToken(
+	ctx context.Context,
+	tokenFile string,
+	region string,
+	k kclient.Client,
+	jwtProvider util.JwtProviderFactory,
+) (*credentials.Credentials, error) {
 	// IRSA enabled service account, let's check that the jwt token filemount and file exists
 	if _, err := os.Stat(filepath.Clean(tokenFile)); err != nil {
 		return nil, fmt.Errorf(errIrsaTokenFileNotFoundOnPod, tokenFile, err)
