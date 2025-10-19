@@ -12,10 +12,11 @@ RUN apk add -U --no-cache \
 
 ENV KUBECTL_VERSION="v1.34.1"
 ENV HELM_VERSION="v3.19.0"
-RUN curl -LO https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl && \
+ARG TARGETARCH=arm64
+RUN curl -LO https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl && \
     chmod +x kubectl && \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
-    wget -q https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz -O - | tar -xzO linux-amd64/helm > /usr/local/bin/helm && \
+    wget -q https://get.helm.sh/helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz -O - | tar -xzO linux-${TARGETARCH}/helm > /usr/local/bin/helm && \
     chmod +x /usr/local/bin/helm
 COPY --from=builder /go/bin/ginkgo /usr/local/bin/
 
